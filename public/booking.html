@@ -3,7 +3,16 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Book an Appointment</title>
+  <title>Renewed Vision Support</title>
+
+  <!-- Plus Jakarta Sans for the header -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@600;700;800&display=swap"
+    rel="stylesheet"
+  >
+
   <style>
     :root {
       --bg: #f6f7fb;
@@ -26,8 +35,16 @@
       padding: 40px 16px;
     }
     .wrap { max-width: 720px; margin: 0 auto; }
-    h1 { margin: 0 0 8px; font-size: 28px; }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 32px;
+      font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+      font-weight: 800;
+      letter-spacing: -0.01em;
+    }
     .sub { color: var(--muted); margin: 0 0 28px; }
+    .sub .tz { font-weight: 600; color: var(--ink); }
+
     .card {
       background: var(--card);
       border: 1px solid var(--border);
@@ -37,7 +54,7 @@
       box-shadow: 0 1px 2px rgba(0,0,0,.03);
     }
     label { display: block; font-weight: 600; margin: 12px 0 6px; font-size: 14px; }
-    input, textarea {
+    input, textarea, select {
       width: 100%;
       border: 1px solid var(--border);
       border-radius: 8px;
@@ -45,13 +62,24 @@
       font-size: 15px;
       font-family: inherit;
       background: #fff;
+      color: var(--ink);
     }
-    input:focus, textarea:focus {
+    /* Native select arrow */
+    select {
+      appearance: none;
+      -webkit-appearance: none;
+      background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path fill='none' stroke='%236b7280' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' d='M1 1.5l5 5 5-5'/></svg>");
+      background-repeat: no-repeat;
+      background-position: right 14px center;
+      padding-right: 36px;
+    }
+    input:focus, textarea:focus, select:focus {
       outline: 2px solid var(--accent);
       outline-offset: 1px;
       border-color: var(--accent);
     }
     textarea { min-height: 80px; resize: vertical; }
+
     button {
       background: var(--accent);
       color: white;
@@ -65,6 +93,7 @@
     }
     button:hover { filter: brightness(1.05); }
     button:disabled { background: #a8b0c4; cursor: not-allowed; }
+
     .slots {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(90px, 1fr));
@@ -95,6 +124,7 @@
       border-color: var(--accent);
     }
     .slot.taken:hover { border-color: var(--border); }
+
     .msg { margin-top: 14px; padding: 10px 12px; border-radius: 8px; font-size: 14px; }
     .msg.ok { background: #e8f5ef; color: var(--ok); }
     .msg.err { background: #fdecea; color: var(--err); }
@@ -105,12 +135,23 @@
 </head>
 <body>
   <div class="wrap">
-    <h1>Book an appointment</h1>
-    <p class="sub">Pick a date and a 30-minute time slot. Slots are Mon–Fri, 9:00 AM – 5:00 PM.</p>
+    <h1>Renewed Vision Support</h1>
+    <p class="sub">
+      Pick a date and a 30-minute time slot. Slots are Mon–Fri, 9:00 AM – 5:00 PM.
+      <span class="tz">All times in Eastern Time.</span>
+    </p>
 
     <div class="card">
-      <label for="date">Date</label>
-      <input type="date" id="date" />
+      <label for="dateSelect">Date</label>
+      <select id="dateSelect" aria-label="Date">
+        <option value="" disabled selected>Loading available dates…</option>
+      </select>
+
+      <!-- Hidden calendar picker, revealed when the user picks "More dates…" -->
+      <div id="moreDateWrap" style="display:none; margin-top:10px;">
+        <input type="date" id="dateInput" />
+      </div>
+
       <div class="hint" id="dateHint"></div>
 
       <div id="slotWrap" style="margin-top: 18px;">
@@ -140,7 +181,7 @@
         </div>
         <div>
           <label for="software_version">Software version</label>
-          <input id="software_version" name="software_version" placeholder="e.g. 7.12.3" />
+          <input id="software_version" name="software_version" placeholder="e.g. ProPresenter 21.3" />
         </div>
       </div>
 
@@ -153,39 +194,118 @@
   </div>
 
 <script>
-  const dateEl = document.getElementById('date');
-  const slotsEl = document.getElementById('slots');
-  const dateHint = document.getElementById('dateHint');
-  const form = document.getElementById('form');
-  const msg = document.getElementById('msg');
-  const summary = document.getElementById('selectedSummary');
+  const dateSelect = document.getElementById('dateSelect');
+  const dateInput  = document.getElementById('dateInput');
+  const moreWrap   = document.getElementById('moreDateWrap');
+  const slotsEl    = document.getElementById('slots');
+  const dateHint   = document.getElementById('dateHint');
+  const form       = document.getElementById('form');
+  const msg        = document.getElementById('msg');
+  const summary    = document.getElementById('selectedSummary');
+
   let selectedSlot = null;
+  let currentDate  = null;
 
-  // Default to next weekday
-  function nextWeekday(d) {
-    const out = new Date(d);
-    while (out.getDay() === 0 || out.getDay() === 6) {
-      out.setDate(out.getDate() + 1);
-    }
-    return out;
+  // "MORE" is a sentinel value for the "More dates…" option.
+  const MORE = '__more__';
+
+  // Eastern-Time-safe "today as YYYY-MM-DD" for the date input's min.
+  const todayET = new Date(
+    new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })
+  );
+  dateInput.min = todayET.toISOString().slice(0, 10);
+
+  /** Human label like "Tomorrow (Tue, Apr 21)" or "Fri, Apr 24". */
+  function labelForDate(dateStr) {
+    const [y, m, d] = dateStr.split('-').map(Number);
+    const dt = new Date(y, m - 1, d);
+    const todayStr = `${todayET.getFullYear()}-${String(todayET.getMonth()+1).padStart(2,'0')}-${String(todayET.getDate()).padStart(2,'0')}`;
+    const tmr = new Date(todayET); tmr.setDate(todayET.getDate() + 1);
+    const tmrStr = `${tmr.getFullYear()}-${String(tmr.getMonth()+1).padStart(2,'0')}-${String(tmr.getDate()).padStart(2,'0')}`;
+    const pretty = dt.toLocaleDateString('en-US', {
+      weekday: 'short', month: 'short', day: 'numeric'
+    });
+    if (dateStr === todayStr) return `Today (${pretty})`;
+    if (dateStr === tmrStr)   return `Tomorrow (${pretty})`;
+    return pretty;
   }
-  const today = new Date();
-  const def = nextWeekday(today);
-  dateEl.min = today.toISOString().slice(0, 10);
-  dateEl.value = def.toISOString().slice(0, 10);
 
-  async function loadSlots() {
+  /** Populate the dropdown from /api/next-available-dates. */
+  async function loadAvailableDates() {
+    try {
+      const res = await fetch('/api/next-available-dates?count=5');
+      const data = await res.json();
+      const dates = data.dates || [];
+
+      dateSelect.innerHTML = '';
+      if (dates.length === 0) {
+        const opt = document.createElement('option');
+        opt.textContent = 'No open dates in the next 60 days';
+        opt.disabled = true; opt.selected = true;
+        dateSelect.appendChild(opt);
+      } else {
+        for (const d of dates) {
+          const opt = document.createElement('option');
+          opt.value = d;
+          opt.textContent = labelForDate(d);
+          dateSelect.appendChild(opt);
+        }
+      }
+      // Always add the "More dates…" escape hatch.
+      const more = document.createElement('option');
+      more.value = MORE;
+      more.textContent = 'More dates…';
+      dateSelect.appendChild(more);
+
+      if (dates.length > 0) {
+        dateSelect.value = dates[0];
+        setDate(dates[0]);
+      }
+    } catch (e) {
+      dateSelect.innerHTML = '<option disabled selected>Couldn\'t load dates</option>';
+    }
+  }
+
+  /** Set the active date and load its slots. */
+  function setDate(dateStr) {
+    currentDate = dateStr;
+    loadSlots(dateStr);
+  }
+
+  dateSelect.addEventListener('change', () => {
+    const val = dateSelect.value;
+    if (val === MORE) {
+      moreWrap.style.display = '';
+      // Default the picker to whatever was last selected, or today.
+      dateInput.value = currentDate || dateInput.min;
+      setTimeout(() => {
+        dateInput.focus();
+        if (typeof dateInput.showPicker === 'function') {
+          try { dateInput.showPicker(); } catch (_) {}
+        }
+      }, 0);
+    } else {
+      moreWrap.style.display = 'none';
+      setDate(val);
+    }
+  });
+
+  dateInput.addEventListener('change', () => {
+    if (dateInput.value) setDate(dateInput.value);
+  });
+
+  /** Fetch slot availability for `date` and render the slot grid. */
+  async function loadSlots(date) {
     slotsEl.innerHTML = '<span class="hint">Loading…</span>';
     form.style.display = 'none';
     selectedSlot = null;
-    const date = dateEl.value;
     if (!date) return;
     const res = await fetch('/api/slots?date=' + encodeURIComponent(date));
     const data = await res.json();
 
     if (!data.slots || data.slots.length === 0) {
       slotsEl.innerHTML = '';
-      dateHint.textContent = 'No slots — please pick a weekday.';
+      dateHint.textContent = 'No slots for this day — please pick a weekday.';
       return;
     }
     dateHint.textContent = '';
@@ -193,9 +313,7 @@
     for (const s of data.slots) {
       const btn = document.createElement('div');
       // Server returns status: "available" | "booked" | "blocked".
-      // Both booked and blocked render the same to the customer — just
-      // "not available" — but we keep distinct classes so we can style
-      // them differently later if desired.
+      // Both booked and blocked render the same to the customer.
       const isOpen = s.status === 'available' || (s.available === true && !s.status);
       btn.className = 'slot' + (isOpen ? '' : ' taken');
       btn.textContent = s.time;
@@ -207,7 +325,7 @@
           document.querySelectorAll('.slot.selected').forEach(x => x.classList.remove('selected'));
           btn.classList.add('selected');
           form.style.display = '';
-          summary.textContent = `Selected: ${date} at ${s.time}`;
+          summary.textContent = `Selected: ${labelForDate(date)} at ${s.time} ET`;
           msg.className = '';
           msg.textContent = '';
         });
@@ -216,14 +334,11 @@
     }
   }
 
-  dateEl.addEventListener('change', loadSlots);
-  loadSlots();
-
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
-    if (!selectedSlot) return;
+    if (!selectedSlot || !currentDate) return;
     const payload = {
-      date: dateEl.value,
+      date: currentDate,
       time: selectedSlot,
       name: document.getElementById('name').value,
       email: document.getElementById('email').value,
@@ -243,15 +358,17 @@
       const data = await res.json();
       if (res.ok) {
         msg.className = 'msg ok';
-        msg.textContent = `Booked! Confirmation #${data.id} for ${data.date} at ${data.time}.`;
+        msg.textContent = `Booked! Confirmation #${data.id} for ${labelForDate(data.date)} at ${data.time} ET.`;
         form.reset();
         form.style.display = 'none';
-        loadSlots();
+        // Refresh so the slot we just booked greys out, and reload the
+        // date dropdown since this day might have just filled up.
+        loadSlots(currentDate);
+        loadAvailableDates();
       } else {
         msg.className = 'msg err';
         msg.textContent = data.error || 'Booking failed.';
-        // Refresh slots so the taken one greys out
-        loadSlots();
+        loadSlots(currentDate);
       }
     } catch (err) {
       msg.className = 'msg err';
@@ -260,6 +377,9 @@
       document.getElementById('submitBtn').disabled = false;
     }
   });
+
+  // Kick things off.
+  loadAvailableDates();
 </script>
 </body>
 </html>

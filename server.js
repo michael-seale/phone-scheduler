@@ -10,6 +10,8 @@
  *
  *   GET  /api/slots?date=YYYY-MM-DD   - list slots for a day w/ status
  *                                       (available | booked | blocked)
+ *   GET  /api/next-available-dates    - next N weekdays with open slots
+ *                                       (?count=5, max 30)
  *   POST /api/appointments            - book an appointment (public + external)
  *   GET  /api/appointments            - list appointments (admin-only)
  *   DELETE /api/appointments/:id      - cancel an appointment (admin-only)
@@ -85,6 +87,14 @@ function isValidDate(dateStr) {
 /** Validate time string is one of our allowed slot starts. */
 function isValidSlotTime(timeStr) {
   return generateSlotsForDay().includes(timeStr);
+}
+
+/** Format a Date as local YYYY-MM-DD (avoids UTC shift of toISOString). */
+function formatLocalDate(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${dd}`;
 }
 
 // ---- Database setup ------------------------------------------------------
@@ -275,6 +285,37 @@ app.get('/api/slots', (req, res) => {
     };
   });
   res.json({ date, slots });
+});
+
+// List the next N upcoming weekdays that have at least one open slot.
+// Used by the booking page to populate the date dropdown.
+app.get('/api/next-available-dates', (req, res) => {
+  const count = Math.min(
+    Math.max(parseInt(req.query.count, 10) || 5, 1),
+    30
+  );
+  // Optional: timezone-aware "today" — we use the server's local date.
+  // Render services default to UTC; the scheduler runs on Eastern Time
+  // so we look ahead from "today in US/Eastern" to stay intuitive.
+  const todayET = new Date(
+    new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })
+  );
+  const slotsPerDay = generateSlotsForDay().length;
+  const dates = [];
+
+  // Look up to 60 days ahead to find `count` dates with at least one open slot.
+  for (let i = 0; i < 60 && dates.length < count; i++) {
+    const d = new Date(todayET);
+    d.setDate(todayET.getDate() + i);
+    const dateStr = formatLocalDate(d);
+    if (!isWeekday(dateStr)) continue;
+    const bookedCount  = stmtListByDate.all(dateStr).length;
+    const blockedCount = stmtListBlockTimesForDate.all(dateStr).length;
+    if (bookedCount + blockedCount < slotsPerDay) {
+      dates.push(dateStr);
+    }
+  }
+  res.json({ dates });
 });
 
 // Create an appointment. Used by the booking page AND external services.

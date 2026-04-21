@@ -469,19 +469,16 @@
   }
 
   async function blockSlot(date, time) {
-    const reason = prompt(`Optional reason for blocking ${time} on ${date}:`, '');
-    if (reason === null) return; // user hit Cancel
     const res = await apiFetch('/api/blocks', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ date, times: [time], reason: reason || null }),
+      body: JSON.stringify({ date, times: [time] }),
     });
     if (res.ok) showMsg(`Blocked ${time}.`, 'ok');
     else showMsg(`Couldn't block ${time}.`, 'err');
   }
 
   async function unblockSlot(date, time) {
-    if (!confirm(`Unblock ${time} on ${date}?`)) return;
     const url = `/api/blocks?date=${encodeURIComponent(date)}&time=${encodeURIComponent(time)}`;
     const res = await apiFetch(url, { method: 'DELETE' });
     if (res.ok) showMsg(`Unblocked ${time}.`, 'ok');
