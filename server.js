@@ -39,11 +39,35 @@ const express = require('express');
 const { DatabaseSync } = require('node:sqlite');
 const crypto = require('crypto');
 const path = require('path');
+const nodemailer = require('nodemailer');
 
 const PORT = process.env.PORT || 3000;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'changeme';
 const API_KEY = process.env.API_KEY || ''; // empty = external API is open
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'appointments.db');
+
+// ---- Email notification settings ----------------------------------------
+// When an appointment is booked, we send a notification email. Gmail /
+// Google Workspace SMTP requires the From address to match the
+// authenticated account, so the customer's email goes into Reply-To instead.
+const SMTP_HOST  = process.env.SMTP_HOST || 'smtp.gmail.com';
+const SMTP_PORT  = parseInt(process.env.SMTP_PORT, 10) || 587;
+const SMTP_USER  = process.env.SMTP_USER || '';
+const SMTP_PASS  = process.env.SMTP_PASS || '';
+const NOTIFY_TO  = process.env.NOTIFY_TO   || 'support@renewedvision.com';
+const NOTIFY_FROM = process.env.NOTIFY_FROM || SMTP_USER;
+
+// Only create the transport if SMTP credentials were configured. That way
+// local dev without SMTP creds still works — it just skips the email.
+let mailer = null;
+if (SMTP_USER && SMTP_PASS) {
+  mailer = nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: SMTP_PORT,
+    secure: SMTP_PORT === 465, // true for 465, false for 587/STARTTLS
+    auth: { user: SMTP_USER, pass: SMTP_PASS },
+  });
+}
 
 // ---- Slot configuration --------------------------------------------------
 const SLOT_MINUTES = 30;
@@ -114,6 +138,72 @@ function isSlotInPast(dateStr, timeStr) {
   const [hh, mm] = timeStr.split(':').map(Number);
   const slot = new Date(y, m - 1, d, hh, mm);
   return slot <= nowET();
+}
+
+/** Pretty date for humans: "Monday, April 27, 2026". */
+function formatPrettyDate(dateStr) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString('en-US', {
+    weekday: 'long',
+    month: 'long',
+    day: 'numeric',
+    year: 'numeric',
+  });
+}
+
+/** Pretty time for humans: "10:00 AM". */
+function formatPrettyTime(timeStr) {
+  const [h, m] = timeStr.split(':').map(Number);
+  return new Date(2000, 0, 1, h, m).toLocaleTimeString('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+}
+
+/**
+ * Send the booking-notification email. Fire-and-forget: any failure is
+ * logged but NEVER blocks or fails the HTTP response to the customer.
+ */
+async function sendBookingNotification(appt) {
+  if (!mailer) {
+    console.warn('[email] SMTP not configured — skipping notification for', appt.id);
+    return;
+  }
+  const prettyDate = formatPrettyDate(appt.date);
+  const prettyTime = formatPrettyTime(appt.time);
+  const subject = `New Event: ${appt.name} on ${prettyDate} at ${prettyTime}`;
+
+  const lines = [
+    `A new appointment has been booked.`,
+    ``,
+    `Name:             ${appt.name}`,
+    `Email:            ${appt.email}`,
+    `Phone:            ${appt.phone || '(not provided)'}`,
+    `Software version: ${appt.software_version || '(not provided)'}`,
+    `Date:             ${prettyDate}`,
+    `Time:             ${prettyTime} Eastern`,
+    `Source:           ${appt.source}`,
+    `Confirmation #:   ${appt.id}`,
+    ``,
+    `Notes / reason for appointment:`,
+    appt.notes ? appt.notes : '(none)',
+    ``,
+    `— Renewed Vision Support scheduler`,
+  ];
+  const text = lines.join('\n');
+
+  try {
+    await mailer.sendMail({
+      from: NOTIFY_FROM,
+      to: NOTIFY_TO,
+      replyTo: appt.email, // Hit "Reply" in support@ inbox → goes to customer
+      subject,
+      text,
+    });
+    console.log(`[email] sent notification for appt #${appt.id} → ${NOTIFY_TO}`);
+  } catch (err) {
+    console.error(`[email] send failed for appt #${appt.id}:`, err.message);
+  }
 }
 
 // ---- Database setup ------------------------------------------------------
@@ -422,7 +512,7 @@ app.post('/api/appointments', (req, res) => {
       notes: String(notes).trim(),
       source,
     });
-    res.status(201).json({
+    const appt = {
       id: result.lastInsertRowid,
       date,
       time,
@@ -432,7 +522,12 @@ app.post('/api/appointments', (req, res) => {
       software_version,
       notes,
       source,
-    });
+    };
+    // Fire-and-forget: don't block the customer's response on SMTP.
+    sendBookingNotification(appt).catch((e) =>
+      console.error('[email] unexpected error:', e)
+    );
+    res.status(201).json(appt);
   } catch (err) {
     // node:sqlite raises errcode 2067 (SQLITE_CONSTRAINT_UNIQUE) when our
     // UNIQUE(date, time) is violated. better-sqlite3 sets err.code — we

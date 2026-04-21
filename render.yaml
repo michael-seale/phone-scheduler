@@ -43,3 +43,31 @@ services:
       # Environment → copy it and give it to whoever's calling your API.
       - key: API_KEY
         generateValue: true
+
+      # ---- SMTP / booking-notification email ----
+      # Defaults match Google Workspace (Gmail). Override any of these in
+      # the Render dashboard if you use a different provider.
+      - key: SMTP_HOST
+        value: smtp.gmail.com
+      - key: SMTP_PORT
+        value: "587"
+
+      # The Google Workspace account the server authenticates as
+      # (e.g. scheduler@renewedvision.com).
+      - key: SMTP_USER
+        sync: false
+
+      # App password for SMTP_USER — NOT the account's regular login.
+      # Generate one at https://myaccount.google.com/apppasswords
+      # (requires 2-Step Verification to be turned on for the account).
+      - key: SMTP_PASS
+        sync: false
+
+      # From address on the outgoing email. Usually the same as SMTP_USER.
+      # Leave blank and the server falls back to SMTP_USER automatically.
+      - key: NOTIFY_FROM
+        sync: false
+
+      # Where the notification email lands.
+      - key: NOTIFY_TO
+        value: support@renewedvision.com
