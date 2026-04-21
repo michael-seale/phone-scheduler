@@ -97,6 +97,25 @@ function formatLocalDate(d) {
   return `${y}-${m}-${dd}`;
 }
 
+/**
+ * Current time expressed in US/Eastern. We build a Date whose local-time
+ * fields reflect Eastern wall-clock time, so we can compare it directly to
+ * other Dates built the same way (see isSlotInPast).
+ */
+function nowET() {
+  return new Date(
+    new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })
+  );
+}
+
+/** True if the given slot (date + HH:MM) has already passed in Eastern Time. */
+function isSlotInPast(dateStr, timeStr) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const [hh, mm] = timeStr.split(':').map(Number);
+  const slot = new Date(y, m - 1, d, hh, mm);
+  return slot <= nowET();
+}
+
 // ---- Database setup ------------------------------------------------------
 const db = new DatabaseSync(DB_PATH);
 try {
@@ -260,8 +279,8 @@ app.get('/admin', requireAdmin, (_req, res) => {
 // ---- Public API ----------------------------------------------------------
 
 // List slots for a given date. Each slot gets a status of
-// "available", "booked", or "blocked". `available` stays in the response
-// as a boolean for backwards compatibility with older clients.
+// "available", "booked", "blocked", or "past". `available` stays in the
+// response as a boolean for backwards compatibility with older clients.
 app.get('/api/slots', (req, res) => {
   const date = req.query.date;
   if (!date || !isValidDate(date)) {
@@ -278,6 +297,7 @@ app.get('/api/slots', (req, res) => {
     let status = 'available';
     if (booked.has(time)) status = 'booked';
     else if (blocked.has(time)) status = 'blocked';
+    else if (isSlotInPast(date, time)) status = 'past';
     return {
       time,
       status,
@@ -288,32 +308,50 @@ app.get('/api/slots', (req, res) => {
 });
 
 // List the next N upcoming weekdays that have at least one open slot.
-// Used by the booking page to populate the date dropdown.
+// Used by the booking page to populate the date dropdown and to find the
+// next day with openings when the current day is full.
+//
+// ?count=N    (default 5, max 30)   — how many dates to return
+// ?from=YYYY-MM-DD (default: today) — start searching from this date (inclusive)
 app.get('/api/next-available-dates', (req, res) => {
   const count = Math.min(
     Math.max(parseInt(req.query.count, 10) || 5, 1),
     30
   );
-  // Optional: timezone-aware "today" — we use the server's local date.
-  // Render services default to UTC; the scheduler runs on Eastern Time
-  // so we look ahead from "today in US/Eastern" to stay intuitive.
-  const todayET = new Date(
-    new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })
-  );
+  const todayET = nowET();
+  let startDate;
+  if (req.query.from && isValidDate(req.query.from)) {
+    const [y, m, d] = req.query.from.split('-').map(Number);
+    startDate = new Date(y, m - 1, d);
+    // Never let callers search into the past.
+    const todayKey = formatLocalDate(todayET);
+    if (formatLocalDate(startDate) < todayKey) startDate = todayET;
+  } else {
+    startDate = todayET;
+  }
+
   const slotsPerDay = generateSlotsForDay().length;
   const dates = [];
 
-  // Look up to 60 days ahead to find `count` dates with at least one open slot.
+  // Look up to 60 days ahead for enough open days.
   for (let i = 0; i < 60 && dates.length < count; i++) {
-    const d = new Date(todayET);
-    d.setDate(todayET.getDate() + i);
+    const d = new Date(startDate);
+    d.setDate(startDate.getDate() + i);
     const dateStr = formatLocalDate(d);
     if (!isWeekday(dateStr)) continue;
-    const bookedCount  = stmtListByDate.all(dateStr).length;
-    const blockedCount = stmtListBlockTimesForDate.all(dateStr).length;
-    if (bookedCount + blockedCount < slotsPerDay) {
-      dates.push(dateStr);
+
+    const bookedTimes  = new Set(stmtListByDate.all(dateStr).map(r => r.time));
+    const blockedTimes = new Set(stmtListBlockTimesForDate.all(dateStr).map(r => r.time));
+
+    // Count available slots that are also not in the past.
+    let openCount = 0;
+    for (const t of generateSlotsForDay()) {
+      if (bookedTimes.has(t) || blockedTimes.has(t)) continue;
+      if (isSlotInPast(dateStr, t)) continue;
+      openCount++;
+      if (openCount > 0) break; // we only need to know there's ≥1
     }
+    if (openCount > 0) dates.push(dateStr);
   }
   res.json({ dates });
 });
@@ -364,6 +402,13 @@ app.post('/api/appointments', (req, res) => {
     return res
       .status(409)
       .json({ error: 'That time slot is unavailable.' });
+  }
+
+  // Reject times that have already passed (in Eastern Time).
+  if (isSlotInPast(date, time)) {
+    return res
+      .status(400)
+      .json({ error: 'That time slot has already passed.' });
   }
 
   try {

@@ -42,8 +42,8 @@
       font-weight: 800;
       letter-spacing: -0.01em;
     }
-    .sub { color: var(--muted); margin: 0 0 28px; }
-    .sub .tz { font-weight: 600; color: var(--ink); }
+    .sub { color: var(--muted); margin: 0 0 6px; }
+    .tz { color: var(--ink); font-weight: 600; margin: 0 0 28px; font-size: 14px; }
 
     .card {
       background: var(--card);
@@ -125,6 +125,25 @@
     }
     .slot.taken:hover { border-color: var(--border); }
 
+    /* Secondary-style inline button used for "Show next day with availability". */
+    .btn-ghost {
+      background: #fff;
+      color: var(--accent);
+      border: 1px solid var(--accent);
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 12px;
+    }
+    .btn-ghost:hover { background: var(--accent-weak); }
+    .no-slots {
+      color: var(--muted);
+      font-size: 14px;
+      margin-top: 8px;
+    }
+
     .msg { margin-top: 14px; padding: 10px 12px; border-radius: 8px; font-size: 14px; }
     .msg.ok { background: #e8f5ef; color: var(--ok); }
     .msg.err { background: #fdecea; color: var(--err); }
@@ -136,10 +155,8 @@
 <body>
   <div class="wrap">
     <h1>Renewed Vision Support</h1>
-    <p class="sub">
-      Pick a date and a 30-minute time slot. Slots are Mon–Fri, 9:00 AM – 5:00 PM.
-      <span class="tz">All times in Eastern Time.</span>
-    </p>
+    <p class="sub">Pick a date and a 30-minute time slot. Slots are Mon–Fri, 9:00 AM – 5:00 PM.</p>
+    <p class="tz">All times in Eastern Time.</p>
 
     <div class="card">
       <label for="dateSelect">Date</label>
@@ -157,6 +174,7 @@
       <div id="slotWrap" style="margin-top: 18px;">
         <label>Available times</label>
         <div class="slots" id="slots"></div>
+        <div id="noSlotsMsg"></div>
       </div>
     </div>
 
@@ -198,6 +216,7 @@
   const dateInput  = document.getElementById('dateInput');
   const moreWrap   = document.getElementById('moreDateWrap');
   const slotsEl    = document.getElementById('slots');
+  const noSlotsMsg = document.getElementById('noSlotsMsg');
   const dateHint   = document.getElementById('dateHint');
   const form       = document.getElementById('form');
   const msg        = document.getElementById('msg');
@@ -294,9 +313,21 @@
     if (dateInput.value) setDate(dateInput.value);
   });
 
+  /** Add one day to a YYYY-MM-DD string, returning YYYY-MM-DD. */
+  function addDays(dateStr, n) {
+    const [y, m, d] = dateStr.split('-').map(Number);
+    const dt = new Date(y, m - 1, d);
+    dt.setDate(dt.getDate() + n);
+    const yy = dt.getFullYear();
+    const mm = String(dt.getMonth() + 1).padStart(2, '0');
+    const dd = String(dt.getDate()).padStart(2, '0');
+    return `${yy}-${mm}-${dd}`;
+  }
+
   /** Fetch slot availability for `date` and render the slot grid. */
   async function loadSlots(date) {
     slotsEl.innerHTML = '<span class="hint">Loading…</span>';
+    noSlotsMsg.innerHTML = '';
     form.style.display = 'none';
     selectedSlot = null;
     if (!date) return;
@@ -310,11 +341,17 @@
     }
     dateHint.textContent = '';
     slotsEl.innerHTML = '';
-    for (const s of data.slots) {
+
+    // Hide already-passed slots entirely (relevant for "today").
+    const visibleSlots = data.slots.filter(s => s.status !== 'past');
+    let availableCount = 0;
+
+    for (const s of visibleSlots) {
       const btn = document.createElement('div');
-      // Server returns status: "available" | "booked" | "blocked".
-      // Both booked and blocked render the same to the customer.
+      // Server returns status: "available" | "booked" | "blocked" | "past".
+      // Past is filtered out above. Booked and blocked render the same.
       const isOpen = s.status === 'available' || (s.available === true && !s.status);
+      if (isOpen) availableCount++;
       btn.className = 'slot' + (isOpen ? '' : ' taken');
       btn.textContent = s.time;
       btn.dataset.time = s.time;
@@ -331,6 +368,56 @@
         });
       }
       slotsEl.appendChild(btn);
+    }
+
+    // No openings left for this day? Offer to jump to the next open weekday.
+    if (availableCount === 0) {
+      if (visibleSlots.length === 0) {
+        // Everything has already passed (common for late-in-the-day views).
+        noSlotsMsg.innerHTML =
+          '<p class="no-slots">No more times available today.</p>';
+      } else {
+        noSlotsMsg.innerHTML =
+          '<p class="no-slots">No openings on this day.</p>';
+      }
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn-ghost';
+      btn.textContent = 'Show next day with availability';
+      btn.addEventListener('click', () => jumpToNextAvailableDay(date));
+      noSlotsMsg.appendChild(btn);
+    }
+  }
+
+  /** Find and switch to the next weekday after `fromDate` that has openings. */
+  async function jumpToNextAvailableDay(fromDate) {
+    const start = addDays(fromDate, 1);
+    try {
+      const res = await fetch(
+        '/api/next-available-dates?count=1&from=' + encodeURIComponent(start)
+      );
+      const data = await res.json();
+      const next = (data.dates || [])[0];
+      if (!next) {
+        noSlotsMsg.innerHTML =
+          '<p class="no-slots">No open dates found in the next 60 days.</p>';
+        return;
+      }
+      // Prefer to set the dropdown; if the date isn't in its options, fall
+      // back to the calendar picker.
+      const hasOption = Array.from(dateSelect.options).some(o => o.value === next);
+      if (hasOption) {
+        dateSelect.value = next;
+        moreWrap.style.display = 'none';
+      } else {
+        dateSelect.value = MORE;
+        moreWrap.style.display = '';
+        dateInput.value = next;
+      }
+      setDate(next);
+    } catch (_) {
+      noSlotsMsg.innerHTML =
+        '<p class="no-slots">Couldn\'t look up the next available day.</p>';
     }
   }
 
