@@ -1,0 +1,15 @@
+{
+  "name": "appointment-scheduler",
+  "version": "1.0.0",
+  "description": "Simple appointment scheduling system with customer booking page, admin scheduler, and REST API.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node --no-warnings server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  }
+}

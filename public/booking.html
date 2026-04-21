@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Book an Appointment</title>
+  <style>
+    :root {
+      --bg: #f6f7fb;
+      --card: #ffffff;
+      --ink: #1a2236;
+      --muted: #6b7280;
+      --accent: #3b5bdb;
+      --accent-weak: #e7ecfd;
+      --ok: #1f8a51;
+      --err: #c0392b;
+      --border: #e5e7eb;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+      min-height: 100vh;
+      padding: 40px 16px;
+    }
+    .wrap { max-width: 720px; margin: 0 auto; }
+    h1 { margin: 0 0 8px; font-size: 28px; }
+    .sub { color: var(--muted); margin: 0 0 28px; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px;
+      margin-bottom: 20px;
+      box-shadow: 0 1px 2px rgba(0,0,0,.03);
+    }
+    label { display: block; font-weight: 600; margin: 12px 0 6px; font-size: 14px; }
+    input, textarea {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-size: 15px;
+      font-family: inherit;
+      background: #fff;
+    }
+    input:focus, textarea:focus {
+      outline: 2px solid var(--accent);
+      outline-offset: 1px;
+      border-color: var(--accent);
+    }
+    textarea { min-height: 80px; resize: vertical; }
+    button {
+      background: var(--accent);
+      color: white;
+      border: 0;
+      border-radius: 8px;
+      padding: 12px 18px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 8px;
+    }
+    button:hover { filter: brightness(1.05); }
+    button:disabled { background: #a8b0c4; cursor: not-allowed; }
+    .slots {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(90px, 1fr));
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .slot {
+      padding: 10px 4px;
+      text-align: center;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #fff;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 14px;
+      user-select: none;
+    }
+    .slot:hover { border-color: var(--accent); }
+    .slot.taken {
+      background: #f3f4f6;
+      color: #9ca3af;
+      cursor: not-allowed;
+      text-decoration: line-through;
+    }
+    .slot.selected {
+      background: var(--accent);
+      color: white;
+      border-color: var(--accent);
+    }
+    .slot.taken:hover { border-color: var(--border); }
+    .msg { margin-top: 14px; padding: 10px 12px; border-radius: 8px; font-size: 14px; }
+    .msg.ok { background: #e8f5ef; color: var(--ok); }
+    .msg.err { background: #fdecea; color: var(--err); }
+    .hint { color: var(--muted); font-size: 13px; margin-top: 4px; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    @media (max-width: 520px) { .row { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Book an appointment</h1>
+    <p class="sub">Pick a date and a 30-minute time slot. Slots are Mon–Fri, 9:00 AM – 5:00 PM.</p>
+
+    <div class="card">
+      <label for="date">Date</label>
+      <input type="date" id="date" />
+      <div class="hint" id="dateHint"></div>
+
+      <div id="slotWrap" style="margin-top: 18px;">
+        <label>Available times</label>
+        <div class="slots" id="slots"></div>
+      </div>
+    </div>
+
+    <form id="form" class="card" style="display:none;">
+      <h3 style="margin-top:0;">Your details</h3>
+      <div id="selectedSummary" class="hint"></div>
+
+      <div class="row">
+        <div>
+          <label for="name">Name *</label>
+          <input id="name" name="name" required />
+        </div>
+        <div>
+          <label for="email">Email *</label>
+          <input id="email" name="email" type="email" required />
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label for="phone">Phone</label>
+          <input id="phone" name="phone" />
+        </div>
+        <div>
+          <label for="software_version">Software version</label>
+          <input id="software_version" name="software_version" placeholder="e.g. 7.12.3" />
+        </div>
+      </div>
+
+      <label for="notes">Notes / reason for appointment</label>
+      <textarea id="notes" name="notes"></textarea>
+
+      <button type="submit" id="submitBtn">Book appointment</button>
+      <div id="msg"></div>
+    </form>
+  </div>
+
+<script>
+  const dateEl = document.getElementById('date');
+  const slotsEl = document.getElementById('slots');
+  const dateHint = document.getElementById('dateHint');
+  const form = document.getElementById('form');
+  const msg = document.getElementById('msg');
+  const summary = document.getElementById('selectedSummary');
+  let selectedSlot = null;
+
+  // Default to next weekday
+  function nextWeekday(d) {
+    const out = new Date(d);
+    while (out.getDay() === 0 || out.getDay() === 6) {
+      out.setDate(out.getDate() + 1);
+    }
+    return out;
+  }
+  const today = new Date();
+  const def = nextWeekday(today);
+  dateEl.min = today.toISOString().slice(0, 10);
+  dateEl.value = def.toISOString().slice(0, 10);
+
+  async function loadSlots() {
+    slotsEl.innerHTML = '<span class="hint">Loading…</span>';
+    form.style.display = 'none';
+    selectedSlot = null;
+    const date = dateEl.value;
+    if (!date) return;
+    const res = await fetch('/api/slots?date=' + encodeURIComponent(date));
+    const data = await res.json();
+
+    if (!data.slots || data.slots.length === 0) {
+      slotsEl.innerHTML = '';
+      dateHint.textContent = 'No slots — please pick a weekday.';
+      return;
+    }
+    dateHint.textContent = '';
+    slotsEl.innerHTML = '';
+    for (const s of data.slots) {
+      const btn = document.createElement('div');
+      btn.className = 'slot' + (s.available ? '' : ' taken');
+      btn.textContent = s.time;
+      btn.dataset.time = s.time;
+      if (s.available) {
+        btn.addEventListener('click', () => {
+          selectedSlot = s.time;
+          document.querySelectorAll('.slot.selected').forEach(x => x.classList.remove('selected'));
+          btn.classList.add('selected');
+          form.style.display = '';
+          summary.textContent = `Selected: ${date} at ${s.time}`;
+          msg.className = '';
+          msg.textContent = '';
+        });
+      }
+      slotsEl.appendChild(btn);
+    }
+  }
+
+  dateEl.addEventListener('change', loadSlots);
+  loadSlots();
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (!selectedSlot) return;
+    const payload = {
+      date: dateEl.value,
+      time: selectedSlot,
+      name: document.getElementById('name').value,
+      email: document.getElementById('email').value,
+      phone: document.getElementById('phone').value,
+      software_version: document.getElementById('software_version').value,
+      notes: document.getElementById('notes').value,
+    };
+    document.getElementById('submitBtn').disabled = true;
+    msg.className = '';
+    msg.textContent = '';
+    try {
+      const res = await fetch('/api/appointments', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        msg.className = 'msg ok';
+        msg.textContent = `Booked! Confirmation #${data.id} for ${data.date} at ${data.time}.`;
+        form.reset();
+        form.style.display = 'none';
+        loadSlots();
+      } else {
+        msg.className = 'msg err';
+        msg.textContent = data.error || 'Booking failed.';
+        // Refresh slots so the taken one greys out
+        loadSlots();
+      }
+    } catch (err) {
+      msg.className = 'msg err';
+      msg.textContent = 'Network error. Please try again.';
+    } finally {
+      document.getElementById('submitBtn').disabled = false;
+    }
+  });
+</script>
+</body>
+</html>

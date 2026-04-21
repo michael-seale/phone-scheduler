@@ -1,0 +1,19 @@
+# Dependencies — installed per-machine by `npm install`
+node_modules/
+
+# Local SQLite database and its journal files — data is NOT committed to git.
+# In production, the DB lives on Render's persistent disk.
+appointments.db
+appointments.db-wal
+appointments.db-shm
+
+# macOS clutter
+.DS_Store
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor / IDE
+.vscode/
+.idea/

@@ -1,0 +1,45 @@
+# Render Blueprint
+# -----------------
+# When you create a "New Blueprint Instance" on Render and point it at this
+# repo, Render reads this file and spins up everything below for you.
+#
+# See https://render.com/docs/blueprint-spec for the full schema.
+
+services:
+  - type: web
+    name: appointment-scheduler
+    runtime: node
+    plan: starter            # $7/mo — required for persistent disk
+    region: oregon           # change if you prefer a different region
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /
+    autoDeploy: true         # redeploy automatically on git push
+
+    # Persistent 1 GB disk so the SQLite file survives restarts/redeploys.
+    disk:
+      name: data
+      mountPath: /var/data
+      sizeGB: 1
+
+    envVars:
+      # Point SQLite at the mounted disk.
+      - key: DB_PATH
+        value: /var/data/appointments.db
+
+      # Node version (matches our engines requirement).
+      - key: NODE_VERSION
+        value: "22"
+
+      # Admin password for the /admin page. `sync: false` means Render will
+      # prompt you to enter a value in the dashboard on first deploy and
+      # keep it private — never stored in this YAML / in git.
+      - key: ADMIN_PASSWORD
+        sync: false
+
+      # API key for external callers of POST /api/appointments.
+      # `generateValue: true` tells Render to auto-generate a strong random
+      # string. You'll find the value in the Render dashboard under
+      # Environment → copy it and give it to whoever's calling your API.
+      - key: API_KEY
+        generateValue: true

@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Admin Login</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f6f7fb;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      margin: 0;
+    }
+    form {
+      background: #fff;
+      padding: 28px 32px;
+      border-radius: 12px;
+      border: 1px solid #e5e7eb;
+      box-shadow: 0 1px 2px rgba(0,0,0,.04);
+      min-width: 320px;
+    }
+    h1 { margin: 0 0 6px; font-size: 20px; }
+    p { color: #6b7280; margin: 0 0 16px; font-size: 14px; }
+    label { display: block; font-weight: 600; font-size: 13px; margin-bottom: 6px; }
+    input {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 1px solid #e5e7eb;
+      font-size: 15px;
+    }
+    button {
+      margin-top: 14px;
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 0;
+      background: #3b5bdb;
+      color: white;
+      font-weight: 600;
+      font-size: 15px;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <form method="post" action="/login">
+    <h1>Scheduler admin</h1>
+    <p>Enter the admin password to view appointments.</p>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autofocus />
+    <button type="submit">Sign in</button>
+  </form>
+</body>
+</html>
