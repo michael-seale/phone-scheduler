@@ -192,10 +192,16 @@
     slotsEl.innerHTML = '';
     for (const s of data.slots) {
       const btn = document.createElement('div');
-      btn.className = 'slot' + (s.available ? '' : ' taken');
+      // Server returns status: "available" | "booked" | "blocked".
+      // Both booked and blocked render the same to the customer — just
+      // "not available" — but we keep distinct classes so we can style
+      // them differently later if desired.
+      const isOpen = s.status === 'available' || (s.available === true && !s.status);
+      btn.className = 'slot' + (isOpen ? '' : ' taken');
       btn.textContent = s.time;
       btn.dataset.time = s.time;
-      if (s.available) {
+      btn.title = s.status === 'blocked' ? 'Unavailable' : (isOpen ? '' : 'Taken');
+      if (isOpen) {
         btn.addEventListener('click', () => {
           selectedSlot = s.time;
           document.querySelectorAll('.slot.selected').forEach(x => x.classList.remove('selected'));

@@ -8,10 +8,16 @@
  *   POST /login                 - submit admin password
  *   POST /logout                - clear admin session
  *
- *   GET  /api/slots?date=YYYY-MM-DD   - list slots for a day w/ availability
+ *   GET  /api/slots?date=YYYY-MM-DD   - list slots for a day w/ status
+ *                                       (available | booked | blocked)
  *   POST /api/appointments            - book an appointment (public + external)
  *   GET  /api/appointments            - list appointments (admin-only)
  *   DELETE /api/appointments/:id      - cancel an appointment (admin-only)
+ *
+ *   GET  /api/blocks?date=YYYY-MM-DD  - list blocked slots (admin-only)
+ *   POST /api/blocks                  - block one or more slots (admin-only)
+ *                                       body: { date, times: ["10:00","10:30"], reason }
+ *   DELETE /api/blocks/:id            - unblock a single slot (admin-only)
  *
  * Auth:
  *   - ADMIN_PASSWORD env var (default: "changeme") gates the /admin UI
@@ -109,6 +115,16 @@ db.exec(`
     token       TEXT PRIMARY KEY,
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
   );
+
+  CREATE TABLE IF NOT EXISTS blocked_slots (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    date        TEXT    NOT NULL,
+    time        TEXT    NOT NULL,
+    reason      TEXT,
+    created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (date, time)
+  );
+  CREATE INDEX IF NOT EXISTS idx_blocks_date ON blocked_slots(date);
 `);
 
 // Prepared statements
@@ -132,6 +148,28 @@ const stmtDelete = db.prepare(`DELETE FROM appointments WHERE id = ?`);
 const stmtInsertSession = db.prepare(`INSERT INTO sessions (token) VALUES (?)`);
 const stmtFindSession = db.prepare(`SELECT token FROM sessions WHERE token = ?`);
 const stmtDeleteSession = db.prepare(`DELETE FROM sessions WHERE token = ?`);
+
+// Block-related prepared statements
+const stmtInsertBlock = db.prepare(`
+  INSERT INTO blocked_slots (date, time, reason)
+  VALUES (@date, @time, @reason)
+`);
+const stmtListBlocksByDate = db.prepare(`
+  SELECT * FROM blocked_slots WHERE date = ? ORDER BY time ASC
+`);
+const stmtListAllBlocks = db.prepare(`
+  SELECT * FROM blocked_slots ORDER BY date ASC, time ASC
+`);
+const stmtListBlockTimesForDate = db.prepare(`
+  SELECT time FROM blocked_slots WHERE date = ?
+`);
+const stmtDeleteBlock = db.prepare(`DELETE FROM blocked_slots WHERE id = ?`);
+const stmtDeleteBlockByDateTime = db.prepare(`
+  DELETE FROM blocked_slots WHERE date = ? AND time = ?
+`);
+const stmtFindBlockByDateTime = db.prepare(`
+  SELECT id FROM blocked_slots WHERE date = ? AND time = ?
+`);
 
 // ---- App setup -----------------------------------------------------------
 const app = express();
@@ -211,7 +249,9 @@ app.get('/admin', requireAdmin, (_req, res) => {
 
 // ---- Public API ----------------------------------------------------------
 
-// List slots for a given date with availability.
+// List slots for a given date. Each slot gets a status of
+// "available", "booked", or "blocked". `available` stays in the response
+// as a boolean for backwards compatibility with older clients.
 app.get('/api/slots', (req, res) => {
   const date = req.query.date;
   if (!date || !isValidDate(date)) {
@@ -220,11 +260,20 @@ app.get('/api/slots', (req, res) => {
   if (!isWeekday(date)) {
     return res.json({ date, slots: [] });
   }
-  const taken = new Set(stmtListByDate.all(date).map((r) => r.time));
-  const slots = generateSlotsForDay().map((time) => ({
-    time,
-    available: !taken.has(time),
-  }));
+  const booked = new Set(stmtListByDate.all(date).map((r) => r.time));
+  const blocked = new Set(
+    stmtListBlockTimesForDate.all(date).map((r) => r.time)
+  );
+  const slots = generateSlotsForDay().map((time) => {
+    let status = 'available';
+    if (booked.has(time)) status = 'booked';
+    else if (blocked.has(time)) status = 'blocked';
+    return {
+      time,
+      status,
+      available: status === 'available',
+    };
+  });
   res.json({ date, slots });
 });
 
@@ -267,6 +316,13 @@ app.post('/api/appointments', (req, res) => {
   }
   if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
     return res.status(400).json({ error: 'a valid email is required' });
+  }
+
+  // Reject blocked slots before we try to insert.
+  if (stmtFindBlockByDateTime.get(date, time)) {
+    return res
+      .status(409)
+      .json({ error: 'That time slot is unavailable.' });
   }
 
   try {
@@ -329,6 +385,112 @@ app.delete('/api/appointments/:id', requireAdmin, (req, res) => {
     return res.status(400).json({ error: 'invalid id' });
   }
   const result = stmtDelete.run(id);
+  if (result.changes === 0) {
+    return res.status(404).json({ error: 'not found' });
+  }
+  res.json({ ok: true });
+});
+
+// ---- Block management (admin-only) ---------------------------------------
+
+// List blocked slots. Optional ?date=YYYY-MM-DD filter.
+app.get('/api/blocks', requireAdmin, (req, res) => {
+  const { date } = req.query;
+  let rows;
+  if (date) {
+    if (!isValidDate(date)) {
+      return res.status(400).json({ error: 'invalid date' });
+    }
+    rows = stmtListBlocksByDate.all(date);
+  } else {
+    rows = stmtListAllBlocks.all();
+  }
+  res.json({ blocks: rows });
+});
+
+// Block one or more slots on a given date.
+// Accepts either a single time or an array of times so the admin UI can
+// block several at once with one click.
+app.post('/api/blocks', requireAdmin, (req, res) => {
+  const body = req.body || {};
+  const { date, reason } = body;
+  let { time, times } = body;
+
+  if (!date || !isValidDate(date)) {
+    return res.status(400).json({ error: 'date (YYYY-MM-DD) is required' });
+  }
+  if (!isWeekday(date)) {
+    return res.status(400).json({ error: 'date must be a weekday' });
+  }
+
+  if (time && !times) times = [time];
+  if (!Array.isArray(times) || times.length === 0) {
+    return res
+      .status(400)
+      .json({ error: 'provide `time` or a non-empty `times` array' });
+  }
+  for (const t of times) {
+    if (!isValidSlotTime(t)) {
+      return res.status(400).json({ error: `invalid time "${t}"` });
+    }
+  }
+
+  const created = [];
+  const alreadyBlocked = [];
+  const booked = [];
+
+  // Find slots already taken by appointments — we refuse to block those.
+  const takenTimes = new Set(stmtListByDate.all(date).map((r) => r.time));
+
+  for (const t of times) {
+    if (takenTimes.has(t)) {
+      booked.push(t);
+      continue;
+    }
+    try {
+      const result = stmtInsertBlock.run({ date, time: t, reason: reason || null });
+      created.push({ id: result.lastInsertRowid, date, time: t, reason: reason || null });
+    } catch (err) {
+      if (
+        err &&
+        (err.errcode === 2067 ||
+          err.code === 'SQLITE_CONSTRAINT_UNIQUE' ||
+          (err.message || '').includes('UNIQUE constraint failed'))
+      ) {
+        alreadyBlocked.push(t);
+      } else {
+        console.error(err);
+        return res.status(500).json({ error: 'Internal error' });
+      }
+    }
+  }
+
+  res.status(201).json({ created, alreadyBlocked, booked });
+});
+
+// Unblock by id.
+app.delete('/api/blocks/:id', requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) {
+    return res.status(400).json({ error: 'invalid id' });
+  }
+  const result = stmtDeleteBlock.run(id);
+  if (result.changes === 0) {
+    return res.status(404).json({ error: 'not found' });
+  }
+  res.json({ ok: true });
+});
+
+// Unblock by (date, time). Convenience so the UI can "toggle" a slot.
+app.delete('/api/blocks', requireAdmin, (req, res) => {
+  const { date, time } = req.query;
+  if (!date || !isValidDate(date)) {
+    return res.status(400).json({ error: 'date (YYYY-MM-DD) is required' });
+  }
+  if (!time || !isValidSlotTime(time)) {
+    return res.status(400).json({ error: 'time is required' });
+  }
+  const result = stmtDeleteBlockByDateTime.run(date, time);
   if (result.changes === 0) {
     return res.status(404).json({ error: 'not found' });
   }
