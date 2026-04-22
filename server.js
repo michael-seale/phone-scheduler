@@ -209,6 +209,21 @@ function isValidSlotTime(timeStr) {
   return generateSlotsForDay().includes(timeStr);
 }
 
+/**
+ * Validate that `tz` is a real IANA time zone name. We use the Intl API
+ * itself as the validator: an invalid zone throws a RangeError. Guards
+ * against the client sending junk that we'd later feed into formatters.
+ */
+function isValidTimezone(tz) {
+  if (!tz || typeof tz !== 'string' || tz.length > 64) return false;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: tz });
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 /** Format a Date as local YYYY-MM-DD (avoids UTC shift of toISOString). */
 function formatLocalDate(d) {
   const y = d.getFullYear();
@@ -289,6 +304,51 @@ function formatPhone(raw) {
     return `(${d.slice(0, 3)})${d.slice(3, 6)}-${d.slice(6)}`;
   }
   return String(raw);
+}
+
+/**
+ * Convert an ET slot (YYYY-MM-DD, HH:MM) into a real Date object. Mirrors
+ * etSlotToDate() in booking.html so email-side formatting lines up with
+ * what the customer saw in the UI.
+ */
+function etSlotToDate(dateStr, timeStr) {
+  return new Date(etIsoString(dateStr, timeStr));
+}
+
+/** "9:00 AM" formatted in the given IANA TZ. */
+function formatLocalTimeIn(date, tz) {
+  return new Intl.DateTimeFormat('en-US', {
+    hour: 'numeric', minute: '2-digit', hour12: true, timeZone: tz,
+  }).format(date);
+}
+
+/** "CDT", "EDT", "BST", etc. for the given date+TZ. */
+function formatTzAbbrIn(date, tz) {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz, timeZoneName: 'short',
+    }).formatToParts(date);
+    return (parts.find((p) => p.type === 'timeZoneName') || {}).value || '';
+  } catch (_) {
+    return '';
+  }
+}
+
+/**
+ * Build the "When" line for the confirmation email. If the customer's
+ * timezone was captured we render in their TZ with the ET equivalent
+ * alongside; otherwise we fall back to ET-only (legacy rows, API clients).
+ */
+function formatWhenForCustomer(dateStr, timeStr, tz) {
+  const date = etSlotToDate(dateStr, timeStr);
+  const shortDate = formatShortDate(dateStr);
+  const etTime = formatLocalTimeIn(date, 'America/New_York');
+  if (!tz || tz === 'America/New_York') {
+    return `${shortDate} at ${etTime} Eastern Time`;
+  }
+  const localTime = formatLocalTimeIn(date, tz);
+  const abbr = formatTzAbbrIn(date, tz);
+  return `${shortDate} at ${localTime} ${abbr} (${etTime} ET)`;
 }
 
 /**
@@ -387,8 +447,15 @@ async function lookupAssignedRep(appt) {
 async function sendCustomerConfirmation(appt) {
   if (!mailer) return;
   const shortDate = formatShortDate(appt.date);
-  const shortTime = formatShortTime(appt.time);
-  const subject = `Phone Appointment with Renewed Vision on ${shortDate} at ${shortTime}`;
+  // Subject uses ET-format lowercase short time ("11:30am") for ET customers
+  // (and legacy rows without a TZ); for non-ET customers we show their
+  // local-looking time so the subject matches what they booked.
+  const useLocal = appt.timezone && appt.timezone !== 'America/New_York';
+  const slotDate = etSlotToDate(appt.date, appt.time);
+  const localShort = useLocal
+    ? formatLocalTimeIn(slotDate, appt.timezone).replace(/\s?(AM|PM)/, (_, p) => p.toLowerCase())
+    : formatShortTime(appt.time);
+  const subject = `Phone Appointment with Renewed Vision on ${shortDate} at ${localShort}`;
 
   // Cancel / reschedule links use the per-appointment token. If APP_BASE_URL
   // isn't set we omit the section — we don't want to embed a bare path like
@@ -398,12 +465,13 @@ async function sendCustomerConfirmation(appt) {
   const cancelUrl     = haveLinks ? `${APP_BASE_URL}/cancel?token=${token}` : '';
   const rescheduleUrl = haveLinks ? `${APP_BASE_URL}/?reschedule=${token}`   : '';
 
+  const whenLine = formatWhenForCustomer(appt.date, appt.time, appt.timezone);
   const lines = [
     `Hi ${appt.name.split(/\s+/)[0]},`,
     ``,
     `Thanks for booking with Renewed Vision Support! Your appointment is confirmed.`,
     ``,
-    `When: ${shortDate} at ${shortTime} Eastern Time`,
+    `When: ${whenLine}`,
     `Phone: ${formatPhone(appt.phone) || '(we\'ll use the number you provide during the call)'}`,
     `Software Version: ${appt.software_version || '(not provided)'}`,
     `Notes you shared: ${appt.notes || '(none)'}`,
@@ -441,7 +509,7 @@ async function sendCustomerConfirmation(appt) {
       <p>Hi ${esc(appt.name.split(/\s+/)[0])},</p>
       <p>Thanks for booking with Renewed Vision Support! Your appointment is confirmed.</p>
       <p>
-        <strong>When:</strong> ${esc(shortDate)} at ${esc(shortTime)} Eastern Time<br>
+        <strong>When:</strong> ${esc(whenLine)}<br>
         <strong>Phone:</strong> ${esc(formatPhone(appt.phone) || "(we'll use the number you provide during the call)")}<br>
         <strong>Software Version:</strong> ${esc(appt.software_version || '(not provided)')}<br>
         <strong>Notes you shared:</strong> ${esc(appt.notes || '(none)')}
@@ -592,10 +660,21 @@ db.exec(`
   }
 })();
 
+// ---- Migration: timezone column ------------------------------------------
+// The booking page sends the customer's IANA TZ (e.g. "America/Chicago") so
+// that the confirmation email renders times in their local zone. We store
+// it per-appointment. Legacy rows stay NULL — email falls back to ET only.
+(function migrateTimezone() {
+  const cols = db.prepare(`PRAGMA table_info(appointments)`).all();
+  if (!cols.some((c) => c.name === 'timezone')) {
+    db.exec(`ALTER TABLE appointments ADD COLUMN timezone TEXT`);
+  }
+})();
+
 // Prepared statements
 const stmtInsert = db.prepare(`
-  INSERT INTO appointments (date, time, name, email, phone, software_version, notes, source, cancel_token)
-  VALUES (@date, @time, @name, @email, @phone, @software_version, @notes, @source, @cancel_token)
+  INSERT INTO appointments (date, time, name, email, phone, software_version, notes, source, cancel_token, timezone)
+  VALUES (@date, @time, @name, @email, @phone, @software_version, @notes, @source, @cancel_token, @timezone)
 `);
 const stmtListByDate = db.prepare(`
   SELECT date, time FROM appointments WHERE date = ?
@@ -624,7 +703,8 @@ const stmtUpdateByToken = db.prepare(`
          time = @time,
          phone = COALESCE(@phone, phone),
          software_version = COALESCE(@software_version, software_version),
-         notes = COALESCE(@notes, notes)
+         notes = COALESCE(@notes, notes),
+         timezone = COALESCE(@timezone, timezone)
    WHERE cancel_token = @cancel_token
 `);
 const stmtInsertSession = db.prepare(`INSERT INTO sessions (token) VALUES (?)`);
@@ -831,6 +911,9 @@ app.post('/api/appointments', (req, res) => {
   const software_version = body.software_version || body.softwareVersion || '';
   const notes = body.notes || '';
   const source = req.header('X-API-Key') ? 'api' : 'web';
+  // IANA timezone the customer's browser is in (e.g. "America/Chicago").
+  // We only trust real IANA names, not free-form strings.
+  const timezone = isValidTimezone(body.timezone) ? body.timezone : null;
 
   if (!date || !isValidDate(date)) {
     return res.status(400).json({ error: 'date (YYYY-MM-DD) is required' });
@@ -876,6 +959,7 @@ app.post('/api/appointments', (req, res) => {
       notes: String(notes).trim(),
       source,
       cancel_token,
+      timezone,
     });
     const appt = {
       id: result.lastInsertRowid,
@@ -888,6 +972,7 @@ app.post('/api/appointments', (req, res) => {
       notes,
       source,
       cancel_token,
+      timezone,
     };
     // Fire-and-forget: don't block the customer's response on SMTP.
     // Two emails go out: the internal notification to support@, and a
@@ -1003,6 +1088,7 @@ app.post('/api/appointments/reschedule', (req, res) => {
           ? String(body.software_version).trim()
           : null,
       notes: body.notes != null ? String(body.notes).trim() : null,
+      timezone: isValidTimezone(body.timezone) ? body.timezone : null,
       cancel_token: token,
     });
     const updated = stmtFindByToken.get(token);

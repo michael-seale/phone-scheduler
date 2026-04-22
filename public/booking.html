@@ -177,8 +177,8 @@
 <body>
   <div class="wrap">
     <h1>Renewed Vision Support</h1>
-    <p class="sub">Pick a date and a 30-minute time slot. Slots are Mon–Fri, 9:00 AM – 5:00 PM.</p>
-    <p class="tz">All times in Eastern Time.</p>
+    <p class="sub">Pick a date and a 30-minute time slot. Slots are Mon–Fri, 9:00 AM – 5:00 PM Eastern Time.</p>
+    <p class="tz" id="tzNote">All times shown in Eastern Time.</p>
 
     <div class="card" id="pickerCard">
       <label for="dateSelect">Date</label>
@@ -278,6 +278,77 @@
     new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })
   );
   dateInput.min = todayET.toISOString().slice(0, 10);
+
+  // ---- Time zone setup ---------------------------------------------------
+  // Appointments are held in Eastern Time, but we display every time in the
+  // customer's local zone so they're picking times that feel familiar. For
+  // non-ET customers we also show the ET equivalent in parens for clarity.
+  let userTz = 'America/New_York';
+  try {
+    userTz = Intl.DateTimeFormat().resolvedOptions().timeZone || userTz;
+  } catch (_) { /* very old browser — stay with ET */ }
+  const isUserInET = (userTz === 'America/New_York');
+
+  /** Convert an ET slot (YYYY-MM-DD, HH:MM) to a real Date. DST-aware. */
+  function etSlotToDate(dateStr, timeStr) {
+    const [y, m, d] = dateStr.split('-').map(Number);
+    // Pick noon as our "what's the ET offset for this date" anchor.
+    const anchor = new Date(Date.UTC(y, m - 1, d, 12, 0));
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/New_York', timeZoneName: 'shortOffset',
+    }).formatToParts(anchor);
+    const offStr = (parts.find(p => p.type === 'timeZoneName') || {}).value || 'GMT-5';
+    const match = offStr.match(/GMT([+-])(\d{1,2})(?::?(\d{2}))?/) || ['-', '-', '5', '00'];
+    const sign = match[1];
+    const hh = String(match[2]).padStart(2, '0');
+    const mm = match[3] || '00';
+    return new Date(`${dateStr}T${timeStr}:00${sign}${hh}:${mm}`);
+  }
+
+  /** Format a Date as "9:00 AM" in the given TZ (user's TZ by default). */
+  function formatLocalTime(date, tz) {
+    return new Intl.DateTimeFormat('en-US', {
+      hour: 'numeric', minute: '2-digit', hour12: true,
+      timeZone: tz || userTz,
+    }).format(date);
+  }
+
+  /** Short TZ abbreviation ("CDT", "EDT", "BST") for a date in that TZ. */
+  function formatTzAbbr(date, tz) {
+    try {
+      const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: tz || userTz, timeZoneName: 'short',
+      }).formatToParts(date);
+      return (parts.find(p => p.type === 'timeZoneName') || {}).value || '';
+    } catch (_) { return ''; }
+  }
+
+  /**
+   * Build the display string for a slot: either "9:00 AM EDT" (ET users)
+   * or "9:00 AM CDT (10:00 AM ET)" for everyone else, so the customer can
+   * always cross-reference with the Eastern-Time anchor.
+   */
+  function slotDisplay(dateStr, timeStr) {
+    const slotDate = etSlotToDate(dateStr, timeStr);
+    const local = formatLocalTime(slotDate, userTz);
+    const tzAbbr = formatTzAbbr(slotDate, userTz);
+    const etLocal = formatLocalTime(slotDate, 'America/New_York');
+    if (isUserInET) return `${local} ${tzAbbr}`.trim();
+    return `${local} ${tzAbbr} (${etLocal} ET)`;
+  }
+
+  // Populate the TZ note: tell the customer what zone we're showing times in.
+  (function setTzNote() {
+    const tzNote = document.getElementById('tzNote');
+    const tzAbbr = formatTzAbbr(new Date(), userTz);
+    if (isUserInET) {
+      tzNote.textContent = 'All times shown in Eastern Time.';
+    } else {
+      const abbr = tzAbbr ? ' (' + tzAbbr + ')' : '';
+      tzNote.textContent =
+        `Times shown in your time zone${abbr}. Appointments are held in Eastern Time.`;
+    }
+  })();
 
   /** Human label like "Tomorrow (Tue, Apr 21)" or "Fri, Apr 24". */
   function labelForDate(dateStr) {
@@ -412,16 +483,29 @@
       }
       if (isOpen) availableCount++;
       btn.className = 'slot' + (isOpen ? '' : ' taken');
-      btn.textContent = s.time;
+      // Render the slot in the customer's local time. 12-hour format reads
+      // better than 24-hour here, and we strip the "00:" minutes-only suffix.
+      const slotDate = etSlotToDate(date, s.time);
+      btn.textContent = formatLocalTime(slotDate, userTz);
       btn.dataset.time = s.time;
-      btn.title = s.status === 'blocked' ? 'Unavailable' : (isOpen ? '' : 'Taken');
+      // Tooltip carries the ET time for non-ET users, plus the status label
+      // (Taken / Unavailable) when the slot isn't clickable.
+      const etTip = isUserInET ? '' : `${s.time} Eastern Time`;
+      if (s.status === 'blocked') {
+        btn.title = etTip ? `Unavailable — ${etTip}` : 'Unavailable';
+      } else if (!isOpen) {
+        btn.title = etTip ? `Taken — ${etTip}` : 'Taken';
+      } else {
+        btn.title = etTip;
+      }
       if (isOpen) {
         btn.addEventListener('click', () => {
           selectedSlot = s.time;
           document.querySelectorAll('.slot.selected').forEach(x => x.classList.remove('selected'));
           btn.classList.add('selected');
           form.style.display = '';
-          summary.textContent = `Selected: ${labelForDate(date)} at ${s.time} ET`;
+          summary.textContent =
+            `Selected: ${labelForDate(date)} at ${slotDisplay(date, s.time)}`;
           msg.className = '';
           msg.textContent = '';
           // Reschedule mode: prefill fields from the original appointment
@@ -503,6 +587,9 @@
       phone: document.getElementById('phone').value,
       software_version: document.getElementById('software_version').value,
       notes: document.getElementById('notes').value,
+      // Customer's IANA time zone (e.g. "America/Chicago"). Used server-side
+      // to render times in their local zone in the confirmation email.
+      timezone: userTz,
     };
     submitBtn.disabled = true;
     msg.className = '';
@@ -533,7 +620,7 @@
           headline.textContent = 'Success! Your phone appointment has been rescheduled.';
         }
         details.textContent =
-          `${labelForDate(data.date)} at ${data.time} ET — check your email for a confirmation.`;
+          `${labelForDate(data.date)} at ${slotDisplay(data.date, data.time)} — check your email for a confirmation.`;
         form.reset();
         form.style.display = 'none';
         pickerCard.style.display = 'none';
@@ -576,7 +663,8 @@
         weekday: 'long', month: 'long', day: 'numeric'
       });
       rescheduleBannerSub.textContent =
-        `Currently booked for ${pretty} at ${rescheduleOriginal.time} ET — ` +
+        `Currently booked for ${pretty} at ` +
+        `${slotDisplay(rescheduleOriginal.date, rescheduleOriginal.time)} — ` +
         `pick a new time below and we'll move it.`;
       rescheduleBanner.style.display = '';
       submitBtn.textContent = 'Reschedule appointment';
