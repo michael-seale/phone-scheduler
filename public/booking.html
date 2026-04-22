@@ -200,10 +200,16 @@
       </div>
     </div>
 
+    <!-- Shown when the user arrives via the "Reschedule" link in their email. -->
+    <div id="rescheduleBanner" class="card" style="display:none; background:#eef1fd; border-color:#c7d0f3;">
+      <p style="margin:0; font-weight:600;">Rescheduling your appointment</p>
+      <p id="rescheduleBannerSub" style="margin:6px 0 0; color:var(--muted); font-size:14px;"></p>
+    </div>
+
     <!-- Shown after a successful booking; hides the picker + form. -->
     <div id="successCard" class="card success" style="display:none;">
       <div class="check">&#10003;</div>
-      <h2>Success! Your phone appointment has been scheduled.</h2>
+      <h2 id="successHeadline">Success! Your phone appointment has been scheduled.</h2>
       <p id="successDetails"></p>
       <a href="https://support.renewedvision.com" class="btn-back">Back to Support</a>
     </div>
@@ -257,6 +263,15 @@
 
   // "MORE" is a sentinel value for the "More dates…" option.
   const MORE = '__more__';
+
+  // Reschedule mode: if the user arrived via ?reschedule=<token> we fetch
+  // their existing appointment, prefill the form, and submit through the
+  // /api/appointments/reschedule endpoint instead of creating a new row.
+  const rescheduleToken = new URLSearchParams(location.search).get('reschedule');
+  let rescheduleOriginal = null; // the original appointment, once loaded
+  const rescheduleBanner = document.getElementById('rescheduleBanner');
+  const rescheduleBannerSub = document.getElementById('rescheduleBannerSub');
+  const submitBtn = document.getElementById('submitBtn');
 
   // Eastern-Time-safe "today as YYYY-MM-DD" for the date input's min.
   const todayET = new Date(
@@ -376,11 +391,25 @@
     const visibleSlots = data.slots.filter(s => s.status !== 'past');
     let availableCount = 0;
 
+    // In reschedule mode we let the user pick their own existing slot
+    // (the server treats a "reschedule to the same slot" as a no-op).
+    const isOriginalSlotDay =
+      rescheduleOriginal && rescheduleOriginal.date === date;
+
     for (const s of visibleSlots) {
       const btn = document.createElement('div');
       // Server returns status: "available" | "booked" | "blocked" | "past".
       // Past is filtered out above. Booked and blocked render the same.
-      const isOpen = s.status === 'available' || (s.available === true && !s.status);
+      let isOpen = s.status === 'available' || (s.available === true && !s.status);
+      // Rescheduling: also treat the user's own current booking as clickable.
+      if (
+        !isOpen &&
+        isOriginalSlotDay &&
+        s.time === rescheduleOriginal.time &&
+        s.status === 'booked'
+      ) {
+        isOpen = true;
+      }
       if (isOpen) availableCount++;
       btn.className = 'slot' + (isOpen ? '' : ' taken');
       btn.textContent = s.time;
@@ -395,6 +424,18 @@
           summary.textContent = `Selected: ${labelForDate(date)} at ${s.time} ET`;
           msg.className = '';
           msg.textContent = '';
+          // Reschedule mode: prefill fields from the original appointment
+          // the first time the form is shown. We don't re-fill on every
+          // slot click because the user may have edited the fields.
+          if (rescheduleOriginal && !form.dataset.prefilled) {
+            document.getElementById('name').value = rescheduleOriginal.name || '';
+            document.getElementById('email').value = rescheduleOriginal.email || '';
+            document.getElementById('phone').value = rescheduleOriginal.phone || '';
+            document.getElementById('software_version').value =
+              rescheduleOriginal.software_version || '';
+            document.getElementById('notes').value = rescheduleOriginal.notes || '';
+            form.dataset.prefilled = '1';
+          }
         });
       }
       slotsEl.appendChild(btn);
@@ -463,11 +504,18 @@
       software_version: document.getElementById('software_version').value,
       notes: document.getElementById('notes').value,
     };
-    document.getElementById('submitBtn').disabled = true;
+    submitBtn.disabled = true;
     msg.className = '';
     msg.textContent = '';
+
+    // In reschedule mode we PATCH-via-POST the existing row by token instead
+    // of creating a new appointment.
+    const isReschedule = !!(rescheduleOriginal && rescheduleToken);
+    const url = isReschedule ? '/api/appointments/reschedule' : '/api/appointments';
+    if (isReschedule) payload.token = rescheduleToken;
+
     try {
-      const res = await fetch('/api/appointments', {
+      const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -480,11 +528,16 @@
         const pickerCard  = document.getElementById('pickerCard');
         const successCard = document.getElementById('successCard');
         const details     = document.getElementById('successDetails');
+        const headline    = document.getElementById('successHeadline');
+        if (isReschedule) {
+          headline.textContent = 'Success! Your phone appointment has been rescheduled.';
+        }
         details.textContent =
           `${labelForDate(data.date)} at ${data.time} ET — check your email for a confirmation.`;
         form.reset();
         form.style.display = 'none';
         pickerCard.style.display = 'none';
+        rescheduleBanner.style.display = 'none';
         successCard.style.display = '';
         // Scroll the success card into view on short/mobile screens.
         successCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -497,12 +550,47 @@
       msg.className = 'msg err';
       msg.textContent = 'Network error. Please try again.';
     } finally {
-      document.getElementById('submitBtn').disabled = false;
+      submitBtn.disabled = false;
     }
   });
 
-  // Kick things off.
-  loadAvailableDates();
+  /**
+   * Entry point for reschedule mode. Fetches the original appointment by
+   * token, shows the banner, updates the submit-button label, and then
+   * falls through to the normal date-loading flow. Any failure (invalid
+   * token, already canceled, network error) falls back silently to the
+   * normal new-booking flow.
+   */
+  async function initReschedule() {
+    if (!rescheduleToken) return;
+    try {
+      const res = await fetch(
+        '/api/appointment-by-token?token=' + encodeURIComponent(rescheduleToken)
+      );
+      if (!res.ok) return;
+      rescheduleOriginal = await res.json();
+      // Pretty-label the original date for the banner without relying on
+      // labelForDate (which does "Today"/"Tomorrow" math we don't need here).
+      const [y, m, d] = rescheduleOriginal.date.split('-').map(Number);
+      const pretty = new Date(y, m - 1, d).toLocaleDateString('en-US', {
+        weekday: 'long', month: 'long', day: 'numeric'
+      });
+      rescheduleBannerSub.textContent =
+        `Currently booked for ${pretty} at ${rescheduleOriginal.time} ET — ` +
+        `pick a new time below and we'll move it.`;
+      rescheduleBanner.style.display = '';
+      submitBtn.textContent = 'Reschedule appointment';
+    } catch (_) {
+      // Silent fallback to normal flow.
+    }
+  }
+
+  // Kick things off. initReschedule runs before the date picker so the
+  // banner is in place and rescheduleOriginal is ready when slots load.
+  (async function init() {
+    await initReschedule();
+    loadAvailableDates();
+  })();
 </script>
 </body>
 </html>

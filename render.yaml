@@ -80,6 +80,15 @@ services:
       - key: NOTIFY_TO
         value: support@renewedvision.com
 
+      # Public base URL for this app — used to build absolute cancel /
+      # reschedule links in the customer's confirmation email. Set this to
+      # whatever your Render service's URL is (or your custom domain once
+      # configured). Example: https://appointment-scheduler.onrender.com
+      # If left blank, the email omits the cancel/reschedule links and falls
+      # back to a "reply to support" note.
+      - key: APP_BASE_URL
+        sync: false
+
       # ---- RenewedVision Scheduler (who's-on-phones lookup) ----
       # The server reads `lib/scheduler-client.js` from the repo at startup
       # and runs it in a sandbox to get the RenewedVisionScheduler global.

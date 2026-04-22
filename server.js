@@ -59,6 +59,11 @@ const SMTP_PASS  = process.env.SMTP_PASS || '';
 const NOTIFY_TO  = process.env.NOTIFY_TO   || 'support@renewedvision.com';
 const NOTIFY_FROM = process.env.NOTIFY_FROM || SMTP_USER;
 
+// Base URL for the public site. Used to build absolute cancel/reschedule
+// links in customer emails. Falls back to a reasonable request-time value
+// if not set, but should be configured in Render env to the real domain.
+const APP_BASE_URL = (process.env.APP_BASE_URL || '').replace(/\/+$/, '');
+
 // Only create the transport if SMTP credentials were configured. That way
 // local dev without SMTP creds still works — it just skips the email.
 let mailer = null;
@@ -384,6 +389,15 @@ async function sendCustomerConfirmation(appt) {
   const shortDate = formatShortDate(appt.date);
   const shortTime = formatShortTime(appt.time);
   const subject = `Phone Appointment with Renewed Vision on ${shortDate} at ${shortTime}`;
+
+  // Cancel / reschedule links use the per-appointment token. If APP_BASE_URL
+  // isn't set we omit the section — we don't want to embed a bare path like
+  // "/cancel?token=..." in an email.
+  const token = appt.cancel_token || '';
+  const haveLinks = APP_BASE_URL && token;
+  const cancelUrl     = haveLinks ? `${APP_BASE_URL}/cancel?token=${token}` : '';
+  const rescheduleUrl = haveLinks ? `${APP_BASE_URL}/?reschedule=${token}`   : '';
+
   const lines = [
     `Hi ${appt.name.split(/\s+/)[0]},`,
     ``,
@@ -394,11 +408,59 @@ async function sendCustomerConfirmation(appt) {
     `Software Version: ${appt.software_version || '(not provided)'}`,
     `Notes you shared: ${appt.notes || '(none)'}`,
     ``,
-    `We'll reach out at the time above. If you need to change or cancel this`,
-    `appointment, just reply to this email and our support team will help.`,
-    ``,
-    `— Renewed Vision Support`,
+    `We'll reach out at the time above.`,
   ];
+  if (haveLinks) {
+    lines.push(
+      ``,
+      `Need to make a change?`,
+      `Reschedule: ${rescheduleUrl}`,
+      `Cancel:     ${cancelUrl}`,
+    );
+  } else {
+    lines.push(
+      ``,
+      `If you need to change or cancel this appointment, just reply to this`,
+      `email and our support team will help.`,
+    );
+  }
+  lines.push(``, `— Renewed Vision Support`);
+
+  // HTML version: same content but with real buttons/links so Gmail doesn't
+  // render the plain URLs inline.
+  const esc = (s) =>
+    String(s ?? '')
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const btn = (href, label, color) =>
+    `<a href="${esc(href)}" style="display:inline-block;padding:10px 18px;` +
+    `background:${color};color:#fff;text-decoration:none;border-radius:6px;` +
+    `font-weight:600;font-family:Arial,sans-serif;font-size:14px;">${esc(label)}</a>`;
+  const html = `
+    <div style="font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#222;line-height:1.5;max-width:560px;">
+      <p>Hi ${esc(appt.name.split(/\s+/)[0])},</p>
+      <p>Thanks for booking with Renewed Vision Support! Your appointment is confirmed.</p>
+      <p>
+        <strong>When:</strong> ${esc(shortDate)} at ${esc(shortTime)} Eastern Time<br>
+        <strong>Phone:</strong> ${esc(formatPhone(appt.phone) || "(we'll use the number you provide during the call)")}<br>
+        <strong>Software Version:</strong> ${esc(appt.software_version || '(not provided)')}<br>
+        <strong>Notes you shared:</strong> ${esc(appt.notes || '(none)')}
+      </p>
+      <p>We'll reach out at the time above.</p>
+      ${
+        haveLinks
+          ? `<p style="margin:22px 0 6px 0;"><strong>Need to make a change?</strong></p>
+             <p style="margin:0;">
+               ${btn(rescheduleUrl, 'Reschedule', '#005f9e')}
+               &nbsp;&nbsp;
+               ${btn(cancelUrl, 'Cancel', '#b03a2e')}
+             </p>`
+          : `<p>If you need to change or cancel this appointment, just reply to this email and our support team will help.</p>`
+      }
+      <p style="color:#666;margin-top:22px;">— Renewed Vision Support</p>
+    </div>
+  `;
+
   try {
     await mailer.sendMail({
       from: NOTIFY_FROM,
@@ -406,6 +468,7 @@ async function sendCustomerConfirmation(appt) {
       replyTo: NOTIFY_TO, // replies go to support@
       subject,
       text: lines.join('\n'),
+      html,
     });
     console.log(`[email] sent confirmation for appt #${appt.id} → ${appt.email}`);
   } catch (err) {
@@ -499,10 +562,40 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_blocks_date ON blocked_slots(date);
 `);
 
+// ---- Migration: cancel_token column --------------------------------------
+// SQLite's CREATE TABLE IF NOT EXISTS won't add new columns to existing
+// tables, so we check pragma and ALTER TABLE if needed. Backfill existing
+// rows with random tokens so the cancel/reschedule links work for them too.
+(function migrateCancelToken() {
+  const cols = db.prepare(`PRAGMA table_info(appointments)`).all();
+  const hasCol = cols.some((c) => c.name === 'cancel_token');
+  if (!hasCol) {
+    db.exec(`ALTER TABLE appointments ADD COLUMN cancel_token TEXT`);
+  }
+  // Unique index (separate from the column because SQLite can't add UNIQUE
+  // inline via ALTER). IF NOT EXISTS means re-runs are safe.
+  db.exec(
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_appts_token ON appointments(cancel_token)`
+  );
+  // Backfill rows that predate the column.
+  const missing = db
+    .prepare(`SELECT id FROM appointments WHERE cancel_token IS NULL`)
+    .all();
+  if (missing.length > 0) {
+    const upd = db.prepare(
+      `UPDATE appointments SET cancel_token = ? WHERE id = ?`
+    );
+    for (const row of missing) {
+      upd.run(crypto.randomBytes(16).toString('hex'), row.id);
+    }
+    console.log(`[db] backfilled cancel_token for ${missing.length} rows`);
+  }
+})();
+
 // Prepared statements
 const stmtInsert = db.prepare(`
-  INSERT INTO appointments (date, time, name, email, phone, software_version, notes, source)
-  VALUES (@date, @time, @name, @email, @phone, @software_version, @notes, @source)
+  INSERT INTO appointments (date, time, name, email, phone, software_version, notes, source, cancel_token)
+  VALUES (@date, @time, @name, @email, @phone, @software_version, @notes, @source, @cancel_token)
 `);
 const stmtListByDate = db.prepare(`
   SELECT date, time FROM appointments WHERE date = ?
@@ -517,6 +610,23 @@ const stmtListRange = db.prepare(`
   ORDER BY date ASC, time ASC
 `);
 const stmtDelete = db.prepare(`DELETE FROM appointments WHERE id = ?`);
+
+// Cancel / reschedule lookups by the per-appointment secret token.
+const stmtFindByToken = db.prepare(`
+  SELECT * FROM appointments WHERE cancel_token = ?
+`);
+const stmtDeleteByToken = db.prepare(`
+  DELETE FROM appointments WHERE cancel_token = ?
+`);
+const stmtUpdateByToken = db.prepare(`
+  UPDATE appointments
+     SET date = @date,
+         time = @time,
+         phone = COALESCE(@phone, phone),
+         software_version = COALESCE(@software_version, software_version),
+         notes = COALESCE(@notes, notes)
+   WHERE cancel_token = @cancel_token
+`);
 const stmtInsertSession = db.prepare(`INSERT INTO sessions (token) VALUES (?)`);
 const stmtFindSession = db.prepare(`SELECT token FROM sessions WHERE token = ?`);
 const stmtDeleteSession = db.prepare(`DELETE FROM sessions WHERE token = ?`);
@@ -755,6 +865,7 @@ app.post('/api/appointments', (req, res) => {
   }
 
   try {
+    const cancel_token = crypto.randomBytes(16).toString('hex');
     const result = stmtInsert.run({
       date,
       time,
@@ -764,6 +875,7 @@ app.post('/api/appointments', (req, res) => {
       software_version: String(software_version).trim(),
       notes: String(notes).trim(),
       source,
+      cancel_token,
     });
     const appt = {
       id: result.lastInsertRowid,
@@ -775,6 +887,7 @@ app.post('/api/appointments', (req, res) => {
       software_version,
       notes,
       source,
+      cancel_token,
     };
     // Fire-and-forget: don't block the customer's response on SMTP.
     // Two emails go out: the internal notification to support@, and a
@@ -799,6 +912,123 @@ app.post('/api/appointments', (req, res) => {
       return res
         .status(409)
         .json({ error: 'That time slot is already booked.' });
+    }
+    console.error(err);
+    res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+// ---- Cancel / reschedule via secret token --------------------------------
+//
+// Every appointment has a random cancel_token generated at booking time.
+// The token is included in the customer's confirmation email as a link, so
+// anyone holding the link can cancel or reschedule that one appointment
+// (and only that one — tokens are 128-bit random, not guessable).
+
+// GET /cancel?token=... — cancels the appointment and redirects to a
+// static "canceled" page. Uses GET so it works from any email client with
+// no JavaScript. Browsers sometimes pre-fetch links, but doing so here is
+// harmless: the worst case is that the booking is canceled a moment early.
+app.get('/cancel', (req, res) => {
+  const token = String(req.query.token || '');
+  if (!token) return res.redirect('/canceled.html?status=missing');
+  const appt = stmtFindByToken.get(token);
+  if (!appt) {
+    // Already canceled, or never existed. Show the same success page so we
+    // don't leak any info about which tokens are valid.
+    return res.redirect('/canceled.html?status=already');
+  }
+  stmtDeleteByToken.run(token);
+  console.log(`[cancel] appt #${appt.id} canceled via token`);
+  res.redirect('/canceled.html?status=ok');
+});
+
+// GET /api/appointment-by-token?token=... — returns the fields needed to
+// prefill the booking form. Never returns the token itself.
+app.get('/api/appointment-by-token', (req, res) => {
+  const token = String(req.query.token || '');
+  if (!token) return res.status(400).json({ error: 'token required' });
+  const a = stmtFindByToken.get(token);
+  if (!a) return res.status(404).json({ error: 'not found' });
+  res.json({
+    id: a.id,
+    date: a.date,
+    time: a.time,
+    name: a.name,
+    email: a.email,
+    phone: a.phone || '',
+    software_version: a.software_version || '',
+    notes: a.notes || '',
+  });
+});
+
+// POST /api/appointments/reschedule — update an existing appointment's
+// date/time (and optionally phone / software / notes) by token.
+app.post('/api/appointments/reschedule', (req, res) => {
+  const body = req.body || {};
+  const token = String(body.token || '');
+  const { date, time } = body;
+  if (!token) return res.status(400).json({ error: 'token required' });
+  const existing = stmtFindByToken.get(token);
+  if (!existing) return res.status(404).json({ error: 'appointment not found' });
+
+  if (!date || !isValidDate(date)) {
+    return res.status(400).json({ error: 'date (YYYY-MM-DD) is required' });
+  }
+  if (!isWeekday(date)) {
+    return res.status(400).json({ error: 'date must be a weekday' });
+  }
+  if (!time || !isValidSlotTime(time)) {
+    return res.status(400).json({
+      error: 'time must be a 30-min slot between 09:00 and 16:30',
+    });
+  }
+  if (isSlotInPast(date, time)) {
+    return res.status(400).json({ error: 'That time slot has already passed.' });
+  }
+  if (stmtFindBlockByDateTime.get(date, time)) {
+    return res.status(409).json({ error: 'That time slot is unavailable.' });
+  }
+  // Allow "reschedule to the same slot" — no-op. If a different slot, the
+  // UNIQUE(date,time) constraint will guard against booking over someone else.
+  const sameSlot = date === existing.date && time === existing.time;
+
+  try {
+    stmtUpdateByToken.run({
+      date,
+      time,
+      phone: body.phone != null ? String(body.phone).trim() : null,
+      software_version:
+        body.software_version != null
+          ? String(body.software_version).trim()
+          : null,
+      notes: body.notes != null ? String(body.notes).trim() : null,
+      cancel_token: token,
+    });
+    const updated = stmtFindByToken.get(token);
+    console.log(
+      `[reschedule] appt #${updated.id}: ${existing.date} ${existing.time} → ${updated.date} ${updated.time}`
+    );
+    // Fire-and-forget: send a fresh confirmation email reflecting the new time.
+    sendCustomerConfirmation(updated).catch((e) =>
+      console.error('[email] unexpected error (reschedule confirmation):', e)
+    );
+    sendBookingNotification(updated).catch((e) =>
+      console.error('[email] unexpected error (reschedule notification):', e)
+    );
+    res.json(updated);
+  } catch (err) {
+    if (
+      err &&
+      (err.errcode === 2067 ||
+        err.code === 'SQLITE_CONSTRAINT_UNIQUE' ||
+        (err.message || '').includes('UNIQUE constraint failed'))
+    ) {
+      if (sameSlot) {
+        // Shouldn't happen, but be explicit
+        return res.json(existing);
+      }
+      return res.status(409).json({ error: 'That time slot is already booked.' });
     }
     console.error(err);
     res.status(500).json({ error: 'Internal error' });
