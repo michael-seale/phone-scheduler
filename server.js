@@ -251,6 +251,24 @@ function formatPrettyTime(timeStr) {
   });
 }
 
+/** Short date for the email body: "April 22". */
+function formatShortDate(dateStr) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString('en-US', {
+    month: 'long',
+    day: 'numeric',
+  });
+}
+
+/** Short time for the email body: "10:30am" (lowercase, no space). */
+function formatShortTime(timeStr) {
+  const [h, m] = timeStr.split(':').map(Number);
+  const suffix = h < 12 ? 'am' : 'pm';
+  const hh12 = ((h + 11) % 12) + 1; // 0→12, 13→1, etc.
+  const mm = String(m).padStart(2, '0');
+  return `${hh12}:${mm}${suffix}`;
+}
+
 /**
  * Return an ISO-8601 string for the given (YYYY-MM-DD, HH:MM) interpreted
  * as Eastern Time — e.g. "2026-04-27T14:00:00-04:00".
@@ -344,31 +362,30 @@ async function sendBookingNotification(appt) {
     console.warn('[email] SMTP not configured — skipping notification for', appt.id);
     return;
   }
-  const prettyDate = formatPrettyDate(appt.date);
-  const prettyTime = formatPrettyTime(appt.time);
-  const subject = `New Event: ${appt.name} on ${prettyDate} at ${prettyTime}`;
-
   // Figure out who's on phones at that time. Non-blocking for booking —
-  // if this fails, we still send the email (without the rep line).
+  // if this fails, we still send the email (without the rep name filled in).
   const assignedRep = await lookupAssignedRep(appt);
 
+  const dateAndTime = `${formatShortDate(appt.date)} at ${formatShortTime(appt.time)}`;
+  const subject = `New Event: ${appt.name} on ${dateAndTime}` +
+    (assignedRep ? ` with ${assignedRep}` : '');
+
   const lines = [
-    `A new appointment has been booked.`,
+    `There has been a new phone appointment booked!`,
     ``,
-    `Name:             ${appt.name}`,
-    `Email:            ${appt.email}`,
-    `Phone:            ${appt.phone || '(not provided)'}`,
-    `Software version: ${appt.software_version || '(not provided)'}`,
-    `Date:             ${prettyDate}`,
-    `Time:             ${prettyTime} Eastern`,
-    `Assigned rep:     ${assignedRep || '(not configured / no one scheduled)'}`,
-    `Source:           ${appt.source}`,
-    `Confirmation #:   ${appt.id}`,
+    `Name: ${appt.name}`,
     ``,
-    `Notes / reason for appointment:`,
-    appt.notes ? appt.notes : '(none)',
+    `Email: ${appt.email}`,
     ``,
-    `— Renewed Vision Support scheduler`,
+    `Phone: ${appt.phone || '(not provided)'}`,
+    ``,
+    `Software Version: ${appt.software_version || '(not provided)'}`,
+    ``,
+    `Date and Time: ${dateAndTime}`,
+    ``,
+    `Assigned Rep: ${assignedRep || '(no one scheduled)'}`,
+    ``,
+    `Notes/Reason for Appointment: ${appt.notes || '(none)'}`,
   ];
   const text = lines.join('\n');
 
