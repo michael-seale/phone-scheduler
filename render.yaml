@@ -89,7 +89,13 @@ services:
       - key: RV_SCHEDULER_API_KEY
         sync: false
 
-      # Group name passed to whoIsOn(). Defaults to "Phone Group".
+      # Role ID to look up (e.g. "phone"). If set, takes precedence over
+      # RV_SCHEDULER_GROUP. Use this when you want "who is on the Phone role".
+      - key: RV_SCHEDULER_ROLE
+        sync: false
+
+      # Group name passed to whoIsOn() when RV_SCHEDULER_ROLE is unset.
+      # Must match the role's `group` field exactly (case-insensitive).
       - key: RV_SCHEDULER_GROUP
         value: Phone Group
 

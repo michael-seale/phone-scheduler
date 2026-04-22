@@ -91,6 +91,9 @@ if (SMTP_USER && SMTP_PASS) {
 //   RV_SCHEDULER_GROUP        — which group to query (default "Phone Group")
 const RV_BIN_ID      = process.env.RV_SCHEDULER_BIN_ID || '';
 const RV_API_KEY     = process.env.RV_SCHEDULER_API_KEY || '';
+// Target to query. RV_SCHEDULER_ROLE takes precedence over RV_SCHEDULER_GROUP.
+// Role is the role ID (e.g. "phone"); group is a group name (e.g. "Phone Group").
+const RV_ROLE        = process.env.RV_SCHEDULER_ROLE || '';
 const RV_GROUP       = process.env.RV_SCHEDULER_GROUP || 'Phone Group';
 const RV_CLIENT_PATH = process.env.RV_SCHEDULER_CLIENT_PATH
   || path.join(__dirname, 'lib', 'scheduler-client.js');
@@ -283,14 +286,44 @@ async function lookupAssignedRep(appt) {
     const [hh, mm] = appt.time.split(':').map(Number);
     const when = new Date(y, mo - 1, d, hh, mm, 0);
 
-    const result = await rvScheduler.whoIsOn({
-      group: RV_GROUP,
-      time:  when,
-    });
+    // Role takes precedence over group if both are configured.
+    const query = { time: when };
+    if (RV_ROLE) query.role = RV_ROLE;
+    else query.group = RV_GROUP;
+    const target = RV_ROLE ? `role="${RV_ROLE}"` : `group="${RV_GROUP}"`;
+
+    const result = await rvScheduler.whoIsOn(query);
     const names = result && Array.isArray(result.names) ? result.names : [];
     if (names.length === 0) {
-      if (result && result.reason) {
-        console.log(`[rv-sched] appt #${appt.id}: no match (${result.reason})`);
+      // Diagnostic: dump what IS in the schedule so it's easy to see the
+      // actual role IDs / group names and fix the env var.
+      const reason = result && result.reason ? ` (${result.reason})` : '';
+      console.log(
+        `[rv-sched] appt #${appt.id}: no one matched ${target} at ` +
+        `${appt.date} ${appt.time}${reason}`
+      );
+      try {
+        const state = await rvScheduler.getSchedule();
+        const allRoles  = (state.roles  || []).map(r => `${r.id}${r.group ? ' (group: '+r.group+')' : ''}`);
+        const allGroups = [...new Set((state.roles || []).map(r => r.group).filter(Boolean))];
+        console.log(`[rv-sched]   available roles:  ${allRoles.join(', ') || '(none)'}`);
+        console.log(`[rv-sched]   available groups: ${allGroups.join(', ') || '(none)'}`);
+        // Also dump what's scheduled in the actual slot we queried, if anything.
+        if (result && result.weekKey && result.dayId && result.hour != null) {
+          const week = state.schedule && state.schedule[result.weekKey];
+          const day  = week && week[result.dayId];
+          const slot = day && day[result.hour];
+          if (Array.isArray(slot) && slot.length > 0) {
+            console.log(
+              `[rv-sched]   people actually in that slot: ` +
+              slot.map(a => `${a.username} (role: ${a.role})`).join(', ')
+            );
+          } else {
+            console.log(`[rv-sched]   that slot is empty in the schedule`);
+          }
+        }
+      } catch (e) {
+        console.log('[rv-sched]   (could not fetch state for diagnostics:', e.message, ')');
       }
       return null;
     }
