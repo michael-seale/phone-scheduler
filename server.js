@@ -270,6 +270,23 @@ function formatShortTime(timeStr) {
 }
 
 /**
+ * Normalize a phone number to "(XXX)XXX-XXXX" format for the email body.
+ * Accepts any input (spaces, dashes, parens, dots, leading "+1" etc.) and
+ * strips it down to 10 digits. If the input can't be reduced to 10 digits,
+ * we return it unchanged so the recipient still sees what the customer typed.
+ */
+function formatPhone(raw) {
+  if (!raw) return '';
+  const digits = String(raw).replace(/\D/g, '');
+  // If it's 11 digits and starts with 1 (US country code), strip the leading 1.
+  const d = digits.length === 11 && digits.startsWith('1') ? digits.slice(1) : digits;
+  if (d.length === 10) {
+    return `(${d.slice(0, 3)})${d.slice(3, 6)}-${d.slice(6)}`;
+  }
+  return String(raw);
+}
+
+/**
  * Return an ISO-8601 string for the given (YYYY-MM-DD, HH:MM) interpreted
  * as Eastern Time — e.g. "2026-04-27T14:00:00-04:00".
  * Uses Intl to figure out whether ET is on EST (-05:00) or EDT (-04:00).
@@ -366,14 +383,14 @@ async function sendCustomerConfirmation(appt) {
   if (!mailer) return;
   const shortDate = formatShortDate(appt.date);
   const shortTime = formatShortTime(appt.time);
-  const subject = `Phone Appointment with Renewed Vision on ${shortDate} and ${shortTime}`;
+  const subject = `Phone Appointment with Renewed Vision on ${shortDate} at ${shortTime}`;
   const lines = [
     `Hi ${appt.name.split(/\s+/)[0]},`,
     ``,
     `Thanks for booking with Renewed Vision Support! Your appointment is confirmed.`,
     ``,
     `When: ${shortDate} at ${shortTime} Eastern Time`,
-    `Phone: ${appt.phone || '(we\'ll use the number you provide during the call)'}`,
+    `Phone: ${formatPhone(appt.phone) || '(we\'ll use the number you provide during the call)'}`,
     `Software Version: ${appt.software_version || '(not provided)'}`,
     `Notes you shared: ${appt.notes || '(none)'}`,
     ``,
@@ -416,7 +433,7 @@ async function sendBookingNotification(appt) {
     ``,
     `Email: ${appt.email}`,
     ``,
-    `Phone: ${appt.phone || '(not provided)'}`,
+    `Phone: ${formatPhone(appt.phone) || '(not provided)'}`,
     ``,
     `Software Version: ${appt.software_version || '(not provided)'}`,
     ``,
