@@ -357,6 +357,45 @@ async function lookupAssignedRep(appt) {
  * Send the booking-notification email. Fire-and-forget: any failure is
  * logged but NEVER blocks or fails the HTTP response to the customer.
  */
+/**
+ * Send a confirmation email to the customer who just booked. Separate from
+ * the internal notification to support@. Failures are logged, never thrown.
+ * Reply-To points at support@ so if the customer replies, it reaches the team.
+ */
+async function sendCustomerConfirmation(appt) {
+  if (!mailer) return;
+  const shortDate = formatShortDate(appt.date);
+  const shortTime = formatShortTime(appt.time);
+  const subject = `Phone Appointment with Renewed Vision on ${shortDate} and ${shortTime}`;
+  const lines = [
+    `Hi ${appt.name.split(/\s+/)[0]},`,
+    ``,
+    `Thanks for booking with Renewed Vision Support! Your appointment is confirmed.`,
+    ``,
+    `When: ${shortDate} at ${shortTime} Eastern Time`,
+    `Phone: ${appt.phone || '(we\'ll use the number you provide during the call)'}`,
+    `Software Version: ${appt.software_version || '(not provided)'}`,
+    `Notes you shared: ${appt.notes || '(none)'}`,
+    ``,
+    `We'll reach out at the time above. If you need to change or cancel this`,
+    `appointment, just reply to this email and our support team will help.`,
+    ``,
+    `— Renewed Vision Support`,
+  ];
+  try {
+    await mailer.sendMail({
+      from: NOTIFY_FROM,
+      to: appt.email,
+      replyTo: NOTIFY_TO, // replies go to support@
+      subject,
+      text: lines.join('\n'),
+    });
+    console.log(`[email] sent confirmation for appt #${appt.id} → ${appt.email}`);
+  } catch (err) {
+    console.error(`[email] confirmation send failed for appt #${appt.id}:`, err.message);
+  }
+}
+
 async function sendBookingNotification(appt) {
   if (!mailer) {
     console.warn('[email] SMTP not configured — skipping notification for', appt.id);
@@ -721,8 +760,13 @@ app.post('/api/appointments', (req, res) => {
       source,
     };
     // Fire-and-forget: don't block the customer's response on SMTP.
+    // Two emails go out: the internal notification to support@, and a
+    // confirmation to the customer. Either failing doesn't affect the other.
     sendBookingNotification(appt).catch((e) =>
-      console.error('[email] unexpected error:', e)
+      console.error('[email] unexpected error (notification):', e)
+    );
+    sendCustomerConfirmation(appt).catch((e) =>
+      console.error('[email] unexpected error (confirmation):', e)
     );
     res.status(201).json(appt);
   } catch (err) {
