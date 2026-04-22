@@ -204,9 +204,42 @@ function isValidDate(dateStr) {
   );
 }
 
-/** Validate time string is one of our allowed slot starts. */
-function isValidSlotTime(timeStr) {
+/**
+ * Any 30-minute start time, "HH:MM" with HH 00-23 and MM either 00 or 30.
+ * Loose format check — does NOT guarantee the slot is actually offered
+ * (that's what isSlotOffered does).
+ */
+function isValidSlotFormat(timeStr) {
+  return /^([01]\d|2[0-3]):(00|30)$/.test(String(timeStr || ''));
+}
+
+/** True if the given HH:MM is inside the default business-hours grid. */
+function isDefaultSlotTime(timeStr) {
   return generateSlotsForDay().includes(timeStr);
+}
+
+/**
+ * Kept for backward compatibility with code that was already validating
+ * against the default weekday grid. New callers should prefer
+ * `isSlotOffered(date, time)` which also accepts custom slots.
+ */
+function isValidSlotTime(timeStr) {
+  return isDefaultSlotTime(timeStr);
+}
+
+/**
+ * True if a slot is bookable at all: either it's a default weekday slot or
+ * the admin added it explicitly via the custom_slots table. This is the
+ * source of truth used by POST /api/appointments and reschedule.
+ */
+function isSlotOffered(dateStr, timeStr) {
+  if (!isValidDate(dateStr)) return false;
+  if (!isValidSlotFormat(timeStr)) return false;
+  if (isWeekday(dateStr) && isDefaultSlotTime(timeStr)) return true;
+  // Statement might not exist yet at module load — guard so the
+  // validator remains usable during startup before prepares run.
+  if (typeof stmtFindCustomSlotByDateTime === 'undefined') return false;
+  return !!stmtFindCustomSlotByDateTime.get(dateStr, timeStr);
 }
 
 /**
@@ -222,6 +255,48 @@ function isValidTimezone(tz) {
   } catch (_) {
     return false;
   }
+}
+
+/**
+ * Hash a password with scrypt + a per-user random salt. The resulting
+ * string carries algo, salt, and hash all in one field so we can change
+ * the algorithm later without a migration.
+ *   Format: "scrypt$<saltHex>$<hashHex>"
+ */
+function hashPassword(password) {
+  if (!password || typeof password !== 'string') {
+    throw new Error('password must be a non-empty string');
+  }
+  const salt = crypto.randomBytes(16);
+  const hash = crypto.scryptSync(password, salt, 64);
+  return `scrypt$${salt.toString('hex')}$${hash.toString('hex')}`;
+}
+
+/**
+ * Constant-time verify of a plaintext password against a stored
+ * hashPassword() output. Returns false on any malformed input.
+ */
+function verifyPassword(password, stored) {
+  if (!password || !stored || typeof stored !== 'string') return false;
+  const parts = stored.split('$');
+  if (parts.length !== 3 || parts[0] !== 'scrypt') return false;
+  try {
+    const salt = Buffer.from(parts[1], 'hex');
+    const expected = Buffer.from(parts[2], 'hex');
+    const actual = crypto.scryptSync(password, salt, expected.length);
+    return (
+      expected.length > 0 &&
+      actual.length === expected.length &&
+      crypto.timingSafeEqual(expected, actual)
+    );
+  } catch (_) {
+    return false;
+  }
+}
+
+/** Basic username rules: 3–32 chars, ASCII letters/digits/._- only. */
+function isValidUsername(u) {
+  return typeof u === 'string' && /^[A-Za-z0-9._-]{3,32}$/.test(u);
 }
 
 /** Format a Date as local YYYY-MM-DD (avoids UTC shift of toISOString). */
@@ -628,6 +703,30 @@ db.exec(`
     UNIQUE (date, time)
   );
   CREATE INDEX IF NOT EXISTS idx_blocks_date ON blocked_slots(date);
+
+  -- Application users (admin + viewer). Separate from the single env-var
+  -- ADMIN_PASSWORD, which still works as a built-in "root" login so you
+  -- can't lock yourself out.
+  CREATE TABLE IF NOT EXISTS users (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    username      TEXT    NOT NULL UNIQUE,
+    password_hash TEXT    NOT NULL,
+    role          TEXT    NOT NULL CHECK (role IN ('admin', 'viewer')),
+    created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
+  );
+
+  -- Custom availability slots. Lets the admin open up times outside the
+  -- default Mon–Fri 9:00–17:00 ET schedule — e.g. a Saturday morning or a
+  -- 19:00 evening slot. Customers can book these from the normal booking
+  -- page just like any other offered slot.
+  CREATE TABLE IF NOT EXISTS custom_slots (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    date        TEXT    NOT NULL,
+    time        TEXT    NOT NULL,
+    created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (date, time)
+  );
+  CREATE INDEX IF NOT EXISTS idx_custom_slots_date ON custom_slots(date);
 `);
 
 // ---- Migration: cancel_token column --------------------------------------
@@ -671,6 +770,32 @@ db.exec(`
   }
 })();
 
+// ---- Migration: session identity columns ---------------------------------
+// The original sessions table only tracked (token, created_at). Now that we
+// have user accounts we also store the user identity on each session so
+// permission checks don't need a join on every request. Existing rows (if
+// any) predate user accounts and therefore came in via ADMIN_PASSWORD — we
+// treat them as the built-in "admin" root user.
+(function migrateSessions() {
+  const cols = db.prepare(`PRAGMA table_info(sessions)`).all();
+  const names = new Set(cols.map((c) => c.name));
+  if (!names.has('user_id')) {
+    db.exec(`ALTER TABLE sessions ADD COLUMN user_id INTEGER`);
+  }
+  if (!names.has('username')) {
+    db.exec(`ALTER TABLE sessions ADD COLUMN username TEXT`);
+  }
+  if (!names.has('role')) {
+    db.exec(`ALTER TABLE sessions ADD COLUMN role TEXT`);
+  }
+  db.exec(
+    `UPDATE sessions
+        SET username = COALESCE(username, 'admin'),
+            role     = COALESCE(role,     'admin')
+      WHERE username IS NULL OR role IS NULL`
+  );
+})();
+
 // Prepared statements
 const stmtInsert = db.prepare(`
   INSERT INTO appointments (date, time, name, email, phone, software_version, notes, source, cancel_token, timezone)
@@ -707,9 +832,55 @@ const stmtUpdateByToken = db.prepare(`
          timezone = COALESCE(@timezone, timezone)
    WHERE cancel_token = @cancel_token
 `);
-const stmtInsertSession = db.prepare(`INSERT INTO sessions (token) VALUES (?)`);
-const stmtFindSession = db.prepare(`SELECT token FROM sessions WHERE token = ?`);
+const stmtInsertSession = db.prepare(
+  `INSERT INTO sessions (token, user_id, username, role) VALUES (?, ?, ?, ?)`
+);
+const stmtFindSession = db.prepare(
+  `SELECT token, user_id, username, role FROM sessions WHERE token = ?`
+);
 const stmtDeleteSession = db.prepare(`DELETE FROM sessions WHERE token = ?`);
+const stmtDeleteSessionsForUser = db.prepare(
+  `DELETE FROM sessions WHERE user_id = ?`
+);
+
+// User-related prepared statements
+const stmtInsertUser = db.prepare(
+  `INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)`
+);
+const stmtListUsers = db.prepare(
+  `SELECT id, username, role, created_at FROM users ORDER BY username ASC`
+);
+const stmtFindUserByName = db.prepare(
+  `SELECT id, username, password_hash, role FROM users WHERE username = ?`
+);
+const stmtFindUserById = db.prepare(
+  `SELECT id, username, role FROM users WHERE id = ?`
+);
+const stmtUpdateUserRole = db.prepare(
+  `UPDATE users SET role = ? WHERE id = ?`
+);
+const stmtUpdateUserPassword = db.prepare(
+  `UPDATE users SET password_hash = ? WHERE id = ?`
+);
+const stmtDeleteUser = db.prepare(`DELETE FROM users WHERE id = ?`);
+
+// Custom slot prepared statements
+const stmtInsertCustomSlot = db.prepare(
+  `INSERT INTO custom_slots (date, time) VALUES (?, ?)`
+);
+const stmtListCustomSlotsByDate = db.prepare(
+  `SELECT id, date, time FROM custom_slots WHERE date = ? ORDER BY time ASC`
+);
+const stmtListAllCustomSlots = db.prepare(
+  `SELECT id, date, time FROM custom_slots ORDER BY date ASC, time ASC`
+);
+const stmtListCustomSlotsInRange = db.prepare(
+  `SELECT id, date, time FROM custom_slots WHERE date BETWEEN ? AND ? ORDER BY date ASC, time ASC`
+);
+const stmtFindCustomSlotByDateTime = db.prepare(
+  `SELECT id, date, time FROM custom_slots WHERE date = ? AND time = ?`
+);
+const stmtDeleteCustomSlot = db.prepare(`DELETE FROM custom_slots WHERE id = ?`);
 
 // Block-related prepared statements
 const stmtInsertBlock = db.prepare(`
@@ -752,18 +923,60 @@ app.use((req, _res, next) => {
   next();
 });
 
-function isAdmin(req) {
+/**
+ * Look up the current session from the admin_token cookie. Returns an
+ * object { token, user_id, username, role } or null if not logged in.
+ * The result is cached on `req` so repeated middleware calls are cheap.
+ */
+function getSession(req) {
+  if (req._session !== undefined) return req._session;
   const token = req.cookies.admin_token;
-  if (!token) return false;
-  return !!stmtFindSession.get(token);
+  if (!token) {
+    req._session = null;
+    return null;
+  }
+  const row = stmtFindSession.get(token);
+  if (!row) {
+    req._session = null;
+    return null;
+  }
+  // Defensive: sessions migrated from the legacy table might have role
+  // NULL even after the migration UPDATE; treat those as root admin.
+  if (!row.role) row.role = 'admin';
+  if (!row.username) row.username = 'admin';
+  req._session = row;
+  return row;
 }
 
-function requireAdmin(req, res, next) {
-  if (!isAdmin(req)) {
+/** Kept for callers that just want a yes/no. */
+function isAdmin(req) {
+  const s = getSession(req);
+  return !!s && s.role === 'admin';
+}
+
+/** Require any logged-in user (admin OR viewer). */
+function requireUser(req, res, next) {
+  const s = getSession(req);
+  if (!s) {
     if (req.accepts('html') && !req.path.startsWith('/api/')) {
       return res.redirect('/login');
     }
     return res.status(401).json({ error: 'Unauthorized' });
+  }
+  next();
+}
+
+/** Require a logged-in admin. Viewers get a 403. */
+function requireAdmin(req, res, next) {
+  const s = getSession(req);
+  if (!s) {
+    if (req.accepts('html') && !req.path.startsWith('/api/')) {
+      return res.redirect('/login');
+    }
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  if (s.role !== 'admin') {
+    return res.status(403).json({ error: 'Admin access required' });
   }
   next();
 }
@@ -777,17 +990,56 @@ app.get('/login', (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'login.html'));
 });
 
+// POST /login
+// Accepts either a username/password pair (new) or just a bare password
+// (legacy form — treated as the built-in root admin). We authenticate in
+// this priority order:
+//   1. ADMIN_PASSWORD env var → session as built-in "admin" root (user_id=NULL)
+//   2. Lookup username in users table and verifyPassword()
+//
+// On failure, re-render the login page with a small error banner so the
+// user can try again without losing state.
 app.post('/login', (req, res) => {
-  const password = (req.body && req.body.password) || '';
-  if (password !== ADMIN_PASSWORD) {
+  const body = req.body || {};
+  const rawUsername = String(body.username || '').trim();
+  const password = String(body.password || '');
+
+  // Legacy support: if no username was provided, assume "admin".
+  const username = rawUsername || 'admin';
+
+  // Root login via ADMIN_PASSWORD. Always accepted for username "admin".
+  let session = null;
+  if (username === 'admin' && password && password === ADMIN_PASSWORD) {
+    session = { user_id: null, username: 'admin', role: 'admin' };
+  } else {
+    // User-table login. Rate-limiting is intentionally omitted here —
+    // this app runs behind a single org's Render instance, not on the
+    // open internet. Add fail2ban / rate limiting at the edge if needed.
+    const user = stmtFindUserByName.get(username);
+    if (user && verifyPassword(password, user.password_hash)) {
+      session = {
+        user_id: user.id,
+        username: user.username,
+        role: user.role,
+      };
+    }
+  }
+
+  if (!session) {
     return res
       .status(401)
-      .send(
-        '<p>Wrong password. <a href="/login">Try again</a>.</p>'
-      );
+      .sendFile(path.join(__dirname, 'public', 'login.html'), {}, (err) => {
+        // If we can't send the file for some reason, fall back to plain HTML.
+        if (err) {
+          res.status(401).send(
+            '<p>Wrong username or password. <a href="/login">Try again</a>.</p>'
+          );
+        }
+      });
   }
+
   const token = crypto.randomBytes(24).toString('hex');
-  stmtInsertSession.run(token);
+  stmtInsertSession.run(token, session.user_id, session.username, session.role);
   res.setHeader(
     'Set-Cookie',
     `admin_token=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${60 * 60 * 12}`
@@ -805,8 +1057,18 @@ app.post('/logout', (req, res) => {
   res.redirect('/login');
 });
 
-app.get('/admin', requireAdmin, (_req, res) => {
+// The /admin page is served to any logged-in user (admin or viewer).
+// Role-gating of individual panels is done inside admin.html based on
+// the /api/me response.
+app.get('/admin', requireUser, (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'admin.html'));
+});
+
+// /api/me — returns the current user's identity so the admin page can
+// decide which panels to render. Safe for any logged-in user.
+app.get('/api/me', requireUser, (req, res) => {
+  const s = getSession(req);
+  res.json({ username: s.username, role: s.role });
 });
 
 // ---- Public API ----------------------------------------------------------
@@ -819,14 +1081,22 @@ app.get('/api/slots', (req, res) => {
   if (!date || !isValidDate(date)) {
     return res.status(400).json({ error: 'date (YYYY-MM-DD) is required' });
   }
-  if (!isWeekday(date)) {
-    return res.json({ date, slots: [] });
-  }
   const booked = new Set(stmtListByDate.all(date).map((r) => r.time));
   const blocked = new Set(
     stmtListBlockTimesForDate.all(date).map((r) => r.time)
   );
-  const slots = generateSlotsForDay().map((time) => {
+  const customRows = stmtListCustomSlotsByDate.all(date);
+  const customTimes = new Set(customRows.map((r) => r.time));
+
+  // Build the full list: default business grid on weekdays, plus any
+  // custom slots the admin added. De-dupe by time and sort.
+  const allTimes = new Set(customTimes);
+  if (isWeekday(date)) {
+    for (const t of generateSlotsForDay()) allTimes.add(t);
+  }
+  const ordered = [...allTimes].sort();
+
+  const slots = ordered.map((time) => {
     let status = 'available';
     if (booked.has(time)) status = 'booked';
     else if (blocked.has(time)) status = 'blocked';
@@ -835,6 +1105,7 @@ app.get('/api/slots', (req, res) => {
       time,
       status,
       available: status === 'available',
+      custom: customTimes.has(time),
     };
   });
   res.json({ date, slots });
@@ -863,28 +1134,35 @@ app.get('/api/next-available-dates', (req, res) => {
     startDate = todayET;
   }
 
-  const slotsPerDay = generateSlotsForDay().length;
   const dates = [];
 
-  // Look up to 60 days ahead for enough open days.
+  // Look up to 60 days ahead for enough open days. A day counts as "open"
+  // if it has at least one bookable time — default weekday slots OR a
+  // custom slot — that isn't booked, blocked, or in the past.
   for (let i = 0; i < 60 && dates.length < count; i++) {
     const d = new Date(startDate);
     d.setDate(startDate.getDate() + i);
     const dateStr = formatLocalDate(d);
-    if (!isWeekday(dateStr)) continue;
+
+    const customTimes = stmtListCustomSlotsByDate.all(dateStr).map((r) => r.time);
+    const isBusinessDay = isWeekday(dateStr);
+    if (!isBusinessDay && customTimes.length === 0) continue;
 
     const bookedTimes  = new Set(stmtListByDate.all(dateStr).map(r => r.time));
     const blockedTimes = new Set(stmtListBlockTimesForDate.all(dateStr).map(r => r.time));
 
-    // Count available slots that are also not in the past.
-    let openCount = 0;
-    for (const t of generateSlotsForDay()) {
+    const candidateTimes = new Set(customTimes);
+    if (isBusinessDay) {
+      for (const t of generateSlotsForDay()) candidateTimes.add(t);
+    }
+    let hasOpen = false;
+    for (const t of candidateTimes) {
       if (bookedTimes.has(t) || blockedTimes.has(t)) continue;
       if (isSlotInPast(dateStr, t)) continue;
-      openCount++;
-      if (openCount > 0) break; // we only need to know there's ≥1
+      hasOpen = true;
+      break;
     }
-    if (openCount > 0) dates.push(dateStr);
+    if (hasOpen) dates.push(dateStr);
   }
   res.json({ dates });
 });
@@ -918,13 +1196,17 @@ app.post('/api/appointments', (req, res) => {
   if (!date || !isValidDate(date)) {
     return res.status(400).json({ error: 'date (YYYY-MM-DD) is required' });
   }
-  if (!isWeekday(date)) {
-    return res.status(400).json({ error: 'date must be a weekday' });
-  }
-  if (!time || !isValidSlotTime(time)) {
+  if (!time || !isValidSlotFormat(time)) {
     return res
       .status(400)
-      .json({ error: `time must be a 30-min slot between 09:00 and 16:30` });
+      .json({ error: 'time must be a 30-minute slot (HH:00 or HH:30)' });
+  }
+  // Slot must be offered: default weekday 9-5 grid, OR an explicit custom slot.
+  if (!isSlotOffered(date, time)) {
+    return res.status(400).json({
+      error:
+        'that time is not available — pick a weekday 9:00–16:30 Eastern or an added slot',
+    });
   }
   if (!name || typeof name !== 'string' || name.trim().length === 0) {
     return res.status(400).json({ error: 'name is required' });
@@ -1060,12 +1342,15 @@ app.post('/api/appointments/reschedule', (req, res) => {
   if (!date || !isValidDate(date)) {
     return res.status(400).json({ error: 'date (YYYY-MM-DD) is required' });
   }
-  if (!isWeekday(date)) {
-    return res.status(400).json({ error: 'date must be a weekday' });
-  }
-  if (!time || !isValidSlotTime(time)) {
+  if (!time || !isValidSlotFormat(time)) {
     return res.status(400).json({
-      error: 'time must be a 30-min slot between 09:00 and 16:30',
+      error: 'time must be a 30-minute slot (HH:00 or HH:30)',
+    });
+  }
+  if (!isSlotOffered(date, time)) {
+    return res.status(400).json({
+      error:
+        'that time is not available — pick a weekday 9:00–16:30 Eastern or an added slot',
     });
   }
   if (isSlotInPast(date, time)) {
@@ -1121,8 +1406,10 @@ app.post('/api/appointments/reschedule', (req, res) => {
   }
 });
 
-// List appointments (admin-only). Optional ?from=YYYY-MM-DD&to=YYYY-MM-DD.
-app.get('/api/appointments', requireAdmin, (req, res) => {
+// List appointments. Any logged-in user (admin or viewer) can read the
+// list — viewers see the full list but the admin page hides the
+// Availability / Users panels for them. Optional ?from=YYYY-MM-DD&to=YYYY-MM-DD.
+app.get('/api/appointments', requireUser, (req, res) => {
   const { from, to } = req.query;
   let rows;
   if (from && to && isValidDate(from) && isValidDate(to)) {
@@ -1143,6 +1430,128 @@ app.delete('/api/appointments/:id', requireAdmin, (req, res) => {
   if (result.changes === 0) {
     return res.status(404).json({ error: 'not found' });
   }
+  res.json({ ok: true });
+});
+
+// ---- User management (admin-only) ----------------------------------------
+//
+// Users created here sign in via username + password. The ADMIN_PASSWORD
+// env var still works as a built-in "admin" root login and cannot be
+// managed via these endpoints — there's no row in the users table for it.
+// Roles: 'admin' (full access) | 'viewer' (read-only appointment list).
+
+function userRowToPublic(u) {
+  return { id: u.id, username: u.username, role: u.role, created_at: u.created_at };
+}
+
+app.get('/api/users', requireAdmin, (_req, res) => {
+  res.json({ users: stmtListUsers.all().map(userRowToPublic) });
+});
+
+app.post('/api/users', requireAdmin, (req, res) => {
+  const body = req.body || {};
+  const username = String(body.username || '').trim();
+  const password = String(body.password || '');
+  const role = String(body.role || '').trim();
+
+  if (!isValidUsername(username)) {
+    return res
+      .status(400)
+      .json({ error: 'username must be 3–32 chars: letters, digits, . _ -' });
+  }
+  if (username === 'admin') {
+    // Avoid shadowing the built-in root login. (Case-insensitive check.)
+    return res
+      .status(400)
+      .json({ error: '"admin" is reserved for the root login' });
+  }
+  if (!password || password.length < 6) {
+    return res.status(400).json({ error: 'password must be at least 6 characters' });
+  }
+  if (role !== 'admin' && role !== 'viewer') {
+    return res.status(400).json({ error: 'role must be "admin" or "viewer"' });
+  }
+
+  try {
+    const result = stmtInsertUser.run(username, hashPassword(password), role);
+    const created = stmtFindUserById.get(result.lastInsertRowid);
+    res.status(201).json(userRowToPublic({
+      ...created,
+      created_at: new Date().toISOString().slice(0, 19).replace('T', ' '),
+    }));
+  } catch (err) {
+    if (
+      err &&
+      (err.errcode === 2067 ||
+        err.code === 'SQLITE_CONSTRAINT_UNIQUE' ||
+        (err.message || '').includes('UNIQUE constraint failed'))
+    ) {
+      return res.status(409).json({ error: 'username already exists' });
+    }
+    console.error(err);
+    res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+app.patch('/api/users/:id', requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) {
+    return res.status(400).json({ error: 'invalid id' });
+  }
+  const existing = stmtFindUserById.get(id);
+  if (!existing) return res.status(404).json({ error: 'not found' });
+
+  const body = req.body || {};
+  const updates = {};
+
+  if (body.role !== undefined) {
+    const role = String(body.role).trim();
+    if (role !== 'admin' && role !== 'viewer') {
+      return res.status(400).json({ error: 'role must be "admin" or "viewer"' });
+    }
+    updates.role = role;
+  }
+  if (body.password !== undefined) {
+    const pw = String(body.password);
+    if (!pw || pw.length < 6) {
+      return res.status(400).json({ error: 'password must be at least 6 characters' });
+    }
+    updates.password_hash = hashPassword(pw);
+  }
+
+  if (Object.keys(updates).length === 0) {
+    return res.status(400).json({ error: 'nothing to update' });
+  }
+
+  if (updates.role) stmtUpdateUserRole.run(updates.role, id);
+  if (updates.password_hash) {
+    stmtUpdateUserPassword.run(updates.password_hash, id);
+    // Force re-login after a password change.
+    stmtDeleteSessionsForUser.run(id);
+  }
+  res.json(userRowToPublic(stmtFindUserById.get(id)));
+});
+
+app.delete('/api/users/:id', requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) {
+    return res.status(400).json({ error: 'invalid id' });
+  }
+  const existing = stmtFindUserById.get(id);
+  if (!existing) return res.status(404).json({ error: 'not found' });
+
+  // Don't let an admin delete their own logged-in account and lock themselves
+  // out. (The ADMIN_PASSWORD root user has user_id = NULL so it's never
+  // deletable via this endpoint anyway.)
+  const me = getSession(req);
+  if (me && me.user_id === id) {
+    return res
+      .status(400)
+      .json({ error: "you can't delete the account you're logged in as" });
+  }
+
+  stmtDeleteUser.run(id);
+  stmtDeleteSessionsForUser.run(id); // invalidate any active sessions
   res.json({ ok: true });
 });
 
@@ -1174,9 +1583,6 @@ app.post('/api/blocks', requireAdmin, (req, res) => {
   if (!date || !isValidDate(date)) {
     return res.status(400).json({ error: 'date (YYYY-MM-DD) is required' });
   }
-  if (!isWeekday(date)) {
-    return res.status(400).json({ error: 'date must be a weekday' });
-  }
 
   if (time && !times) times = [time];
   if (!Array.isArray(times) || times.length === 0) {
@@ -1185,7 +1591,9 @@ app.post('/api/blocks', requireAdmin, (req, res) => {
       .json({ error: 'provide `time` or a non-empty `times` array' });
   }
   for (const t of times) {
-    if (!isValidSlotTime(t)) {
+    // Allow blocking any slot that's actually offered on this date
+    // (default weekday grid OR an admin-added custom slot).
+    if (!isSlotOffered(date, t)) {
       return res.status(400).json({ error: `invalid time "${t}"` });
     }
   }
@@ -1249,6 +1657,91 @@ app.delete('/api/blocks', requireAdmin, (req, res) => {
   if (result.changes === 0) {
     return res.status(404).json({ error: 'not found' });
   }
+  res.json({ ok: true });
+});
+
+// ---- Custom availability slots (admin-only writes, public reads) ---------
+//
+// The default schedule is Mon–Fri 9:00–17:00 Eastern. To offer times outside
+// that window (a Saturday morning, an after-hours slot on Tuesday, etc.) the
+// admin can add them explicitly here. Custom slots show up in /api/slots
+// and /api/next-available-dates alongside the default grid, and the normal
+// booking flow treats them as bookable.
+
+// Public: list custom slots for a date or range. No auth — customers need
+// this if you ever want to render them client-side, and it leaks nothing
+// sensitive (just which extra times are offered).
+app.get('/api/custom-slots', (req, res) => {
+  const { date, from, to } = req.query;
+  let rows;
+  if (date) {
+    if (!isValidDate(date)) return res.status(400).json({ error: 'invalid date' });
+    rows = stmtListCustomSlotsByDate.all(date);
+  } else if (from && to) {
+    if (!isValidDate(from) || !isValidDate(to)) {
+      return res.status(400).json({ error: 'invalid from/to' });
+    }
+    rows = stmtListCustomSlotsInRange.all(from, to);
+  } else {
+    rows = stmtListAllCustomSlots.all();
+  }
+  res.json({ slots: rows });
+});
+
+// Admin: add a custom slot.
+app.post('/api/custom-slots', requireAdmin, (req, res) => {
+  const body = req.body || {};
+  const { date, time } = body;
+  if (!date || !isValidDate(date)) {
+    return res.status(400).json({ error: 'date (YYYY-MM-DD) is required' });
+  }
+  if (!time || !isValidSlotFormat(time)) {
+    return res
+      .status(400)
+      .json({ error: 'time must be HH:MM on a 30-minute increment (e.g. 08:00, 19:30)' });
+  }
+  // If this slot is already part of the default weekday grid, there's
+  // nothing to add — reject clearly so the admin isn't confused.
+  if (isWeekday(date) && isDefaultSlotTime(time)) {
+    return res
+      .status(409)
+      .json({ error: 'that time is already part of the default schedule' });
+  }
+  try {
+    const result = stmtInsertCustomSlot.run(date, time);
+    res.status(201).json({ id: result.lastInsertRowid, date, time });
+  } catch (err) {
+    if (
+      err &&
+      (err.errcode === 2067 ||
+        err.code === 'SQLITE_CONSTRAINT_UNIQUE' ||
+        (err.message || '').includes('UNIQUE constraint failed'))
+    ) {
+      return res.status(409).json({ error: 'that custom slot already exists' });
+    }
+    console.error(err);
+    res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+// Admin: remove a custom slot. Refuse if someone has already booked it.
+app.delete('/api/custom-slots/:id', requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) {
+    return res.status(400).json({ error: 'invalid id' });
+  }
+  const row = db
+    .prepare(`SELECT id, date, time FROM custom_slots WHERE id = ?`)
+    .get(id);
+  if (!row) return res.status(404).json({ error: 'not found' });
+  const booked = stmtListByDate.all(row.date).some((r) => r.time === row.time);
+  if (booked) {
+    return res.status(409).json({
+      error:
+        'that slot has an appointment booked — cancel the appointment before removing the slot',
+    });
+  }
+  stmtDeleteCustomSlot.run(id);
   res.json({ ok: true });
 });
 

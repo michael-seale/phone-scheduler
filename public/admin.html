@@ -35,8 +35,11 @@
     }
     h1 { margin: 0; font-size: 24px; }
     .muted { color: var(--muted); font-size: 13px; }
+    .whoami { color: var(--muted); font-size: 13px; margin-right: 4px; }
+    .whoami strong { color: var(--ink); }
 
-    input[type="date"], button, select {
+    input[type="date"], input[type="time"], input[type="text"],
+    input[type="password"], button, select {
       border: 1px solid var(--border);
       border-radius: 8px;
       padding: 8px 12px;
@@ -91,6 +94,8 @@
     /* Controls row */
     .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
     .row.controls label.muted { margin-right: -4px; }
+    .subsection { margin-top: 20px; }
+    .subsection h3 { margin: 0 0 8px; font-size: 14px; font-weight: 600; color: var(--ink); }
 
     /* Date chips */
     .chips {
@@ -121,6 +126,9 @@
     .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
     .pill.web { background: var(--accent-weak); color: var(--accent); }
     .pill.api { background: #fff3e0; color: var(--warn); }
+    .pill.admin { background: #e8f5ef; color: var(--ok); }
+    .pill.viewer { background: #f3f4f6; color: var(--muted); }
+    .pill.custom { background: #fff3e0; color: var(--warn); margin-left: 6px; font-size: 10px; }
     .notes { max-width: 280px; white-space: pre-wrap; }
     .empty { padding: 28px; text-align: center; color: var(--muted); }
 
@@ -130,6 +138,7 @@
     .dot.available { background: #fff; border: 1px solid var(--border); }
     .dot.booked    { background: var(--accent-weak); border: 1px solid #c1cdf6; }
     .dot.blocked   { background: #f3f4f6; border: 1px solid #d1d5db; }
+    .dot.custom    { background: #fff3e0; border: 1px solid #f4c77a; }
 
     .slot-grid {
       display: grid;
@@ -138,6 +147,7 @@
       margin-top: 12px;
     }
     .slot {
+      position: relative;
       border: 1px solid var(--border);
       border-radius: 8px;
       padding: 10px 8px;
@@ -158,6 +168,7 @@
       text-transform: uppercase;
       letter-spacing: .04em;
     }
+    .slot.custom-slot { box-shadow: inset 0 0 0 2px #f4c77a; }
     .slot.available:hover { border-color: var(--accent); }
     .slot.booked {
       background: var(--accent-weak);
@@ -173,6 +184,19 @@
     }
     .slot.blocked .sub { text-decoration: none; color: var(--warn); }
     .slot.blocked:hover { border-color: var(--warn); }
+    .slot .remove {
+      position: absolute;
+      top: 2px; right: 4px;
+      background: none;
+      border: 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1;
+      padding: 2px 4px;
+      cursor: pointer;
+      border-radius: 4px;
+    }
+    .slot .remove:hover { color: var(--err); background: #fdecea; }
 
     .toast {
       margin-top: 14px;
@@ -184,15 +208,47 @@
     .toast.err { background: #fdecea; color: var(--err); }
 
     form.logout { display: inline; margin: 0; }
+
+    /* Users panel */
+    .add-user {
+      display: grid;
+      grid-template-columns: 1fr 1fr 140px auto;
+      gap: 10px;
+      align-items: end;
+    }
+    .add-user label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; font-weight: 600; }
+    .add-user input, .add-user select { width: 100%; }
+    @media (max-width: 720px) {
+      .add-user { grid-template-columns: 1fr; }
+    }
+
+    /* Add-times row */
+    .add-times {
+      display: grid;
+      grid-template-columns: 180px 140px auto;
+      gap: 10px;
+      align-items: end;
+    }
+    .add-times label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; font-weight: 600; }
+    .add-times input { width: 100%; }
+    @media (max-width: 520px) {
+      .add-times { grid-template-columns: 1fr; }
+    }
+
+    /* Hidden helper */
+    [hidden] { display: none !important; }
   </style>
 </head>
 <body>
   <div class="wrap">
     <header>
       <h1>Scheduler</h1>
-      <form class="logout" method="post" action="/logout">
-        <button type="submit" class="ghost">Log out</button>
-      </form>
+      <div class="row">
+        <span class="whoami" id="whoami"></span>
+        <form class="logout" method="post" action="/logout">
+          <button type="submit" class="ghost">Log out</button>
+        </form>
+      </div>
     </header>
 
     <!-- ======================= APPOINTMENTS ======================= -->
@@ -217,10 +273,10 @@
     </details>
 
     <!-- ======================== AVAILABILITY ====================== -->
-    <details class="panel" id="availPanel">
+    <details class="panel" id="availPanel" hidden>
       <summary>
         <span class="title"><span class="chev"></span>Availability</span>
-        <span class="muted">Block off individual slots</span>
+        <span class="muted">Block off slots or add extra times</span>
       </summary>
       <div class="panel-body">
         <div class="row controls">
@@ -232,9 +288,79 @@
           <span><span class="dot available"></span>Available (click to block)</span>
           <span><span class="dot booked"></span>Booked</span>
           <span><span class="dot blocked"></span>Blocked (click to unblock)</span>
+          <span><span class="dot custom"></span>Custom (×&nbsp;to remove)</span>
         </div>
         <div id="slotGrid" class="slot-grid"></div>
         <div id="availMsg"></div>
+
+        <div class="subsection">
+          <h3>Add times</h3>
+          <p class="muted" style="margin: 0 0 10px;">
+            Open up a time outside the default Mon–Fri 9:00–16:30 Eastern schedule.
+            Custom times apply to the date shown above and appear in the grid for admins and in
+            the booking page for customers.
+          </p>
+          <div class="add-times">
+            <div>
+              <label for="addTimeDate">Date</label>
+              <input type="date" id="addTimeDate" />
+            </div>
+            <div>
+              <label for="addTimeTime">Time (HH:MM)</label>
+              <input type="time" id="addTimeTime" step="1800" />
+            </div>
+            <div>
+              <button id="addTimeBtn" class="primary">Add time</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <!-- =========================== USERS ========================== -->
+    <details class="panel" id="usersPanel" hidden>
+      <summary>
+        <span class="title"><span class="chev"></span>Users</span>
+        <span class="muted" id="usersCount"></span>
+      </summary>
+      <div class="panel-body">
+        <p class="muted" style="margin: 0 0 12px;">
+          Admins can do everything. Viewers can only see the appointments list.
+          The built-in <strong>admin</strong> account (logged in with <code>ADMIN_PASSWORD</code>)
+          isn't managed here — it always works as a root login.
+        </p>
+
+        <div class="subsection">
+          <h3>Add user</h3>
+          <div class="add-user">
+            <div>
+              <label for="newUsername">Username</label>
+              <input type="text" id="newUsername" autocomplete="off" placeholder="alex" />
+            </div>
+            <div>
+              <label for="newPassword">Password</label>
+              <input type="password" id="newPassword" autocomplete="new-password" placeholder="at least 6 chars" />
+            </div>
+            <div>
+              <label for="newRole">Role</label>
+              <select id="newRole">
+                <option value="viewer">Viewer</option>
+                <option value="admin">Admin</option>
+              </select>
+            </div>
+            <div>
+              <button id="addUserBtn" class="primary">Add user</button>
+            </div>
+          </div>
+          <div id="userMsg"></div>
+        </div>
+
+        <div class="subsection">
+          <h3>Existing users</h3>
+          <div id="userTable">
+            <div class="empty">Loading…</div>
+          </div>
+        </div>
       </div>
     </details>
   </div>
@@ -247,7 +373,10 @@
 
   function todayISO() {
     const d = new Date();
-    return d.toISOString().slice(0, 10);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${dd}`;
   }
 
   async function apiFetch(url, options = {}) {
@@ -257,6 +386,45 @@
       throw new Error('unauthorized');
     }
     return res;
+  }
+
+  // Fetch JSON, throw on non-2xx with the server-provided error message
+  // (if any) bubbled up as Error.message.
+  async function apiJson(url, options = {}) {
+    const res = await apiFetch(url, options);
+    let body = null;
+    try { body = await res.json(); } catch (_) { /* ignore */ }
+    if (!res.ok) {
+      const msg = (body && body.error) || `HTTP ${res.status}`;
+      const err = new Error(msg);
+      err.status = res.status;
+      throw err;
+    }
+    return body;
+  }
+
+  /* ====================== ROLE DISCOVERY ======================== */
+  // The /admin page is served to any logged-in user. We fetch /api/me to
+  // find out whether the current user is an admin or viewer, then show
+  // or hide the Availability / Users panels accordingly.
+  let currentUser = { username: '', role: 'viewer' };
+  const whoami = document.getElementById('whoami');
+  const availPanel = document.getElementById('availPanel');
+  const usersPanel = document.getElementById('usersPanel');
+
+  async function loadMe() {
+    try {
+      currentUser = await apiJson('/api/me');
+    } catch (_) {
+      currentUser = { username: '', role: 'viewer' };
+    }
+    whoami.innerHTML =
+      `Signed in as <strong>${esc(currentUser.username)}</strong> ` +
+      `<span class="pill ${currentUser.role === 'admin' ? 'admin' : 'viewer'}">${esc(currentUser.role)}</span>`;
+    if (currentUser.role === 'admin') {
+      availPanel.hidden = false;
+      usersPanel.hidden = false;
+    }
   }
 
   /* ====================== APPOINTMENTS TAB ===================== */
@@ -308,19 +476,16 @@
     let rows = [];
     try {
       if (selectedDates.size === 0) {
-        // Show all upcoming (today forward).
         const today = todayISO();
         const far  = '2099-12-31';
         const res = await apiFetch(`/api/appointments?from=${today}&to=${far}`);
         rows = (await res.json()).appointments || [];
       } else {
-        // Query each date individually (simple, keeps server API unchanged).
         const dates = [...selectedDates];
         const results = await Promise.all(dates.map(async (d) => {
           const r = await apiFetch(`/api/appointments?from=${d}&to=${d}`);
           return (await r.json()).appointments || [];
         }));
-        // De-dupe by id (shouldn't really happen, but just in case).
         const seen = new Set();
         rows = results.flat().filter((a) => {
           if (seen.has(a.id)) return false;
@@ -346,12 +511,14 @@
       apptTable.innerHTML = '<div class="empty">No appointments for the selected dates.</div>';
       return;
     }
+    // Viewers don't get a Cancel button — that's an admin action.
+    const showCancel = currentUser.role === 'admin';
     apptTable.innerHTML = `
       <table>
         <thead>
           <tr>
             <th>Date</th><th>Time</th><th>Name</th><th>Email</th>
-            <th>Phone</th><th>Version</th><th>Notes</th><th>Source</th><th></th>
+            <th>Phone</th><th>Version</th><th>Notes</th><th>Source</th>${showCancel ? '<th></th>' : ''}
           </tr>
         </thead>
         <tbody>
@@ -365,26 +532,27 @@
               <td>${esc(r.software_version)}</td>
               <td class="notes">${esc(r.notes)}</td>
               <td><span class="pill ${r.source === 'api' ? 'api' : 'web'}">${esc(r.source)}</span></td>
-              <td><button class="danger" data-cancel="${r.id}">Cancel</button></td>
+              ${showCancel ? `<td><button class="danger" data-cancel="${r.id}">Cancel</button></td>` : ''}
             </tr>
           `).join('')}
         </tbody>
       </table>
     `;
-    apptTable.querySelectorAll('[data-cancel]').forEach((btn) => {
-      btn.addEventListener('click', async () => {
-        if (!confirm('Cancel this appointment?')) return;
-        const id = btn.getAttribute('data-cancel');
-        const res = await apiFetch('/api/appointments/' + id, { method: 'DELETE' });
-        if (res.ok) {
-          loadAppointments();
-          // If availability panel is open and showing this date, refresh it.
-          if (document.getElementById('availPanel').open) loadSlotGrid();
-        } else {
-          alert('Failed to cancel');
-        }
+    if (showCancel) {
+      apptTable.querySelectorAll('[data-cancel]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          if (!confirm('Cancel this appointment?')) return;
+          const id = btn.getAttribute('data-cancel');
+          const res = await apiFetch('/api/appointments/' + id, { method: 'DELETE' });
+          if (res.ok) {
+            loadAppointments();
+            if (availPanel.open) loadSlotGrid();
+          } else {
+            alert('Failed to cancel');
+          }
+        });
       });
-    });
+    }
   }
 
   /* ===================== AVAILABILITY TAB ====================== */
@@ -392,18 +560,22 @@
   const availRefresh = document.getElementById('availRefresh');
   const slotGrid     = document.getElementById('slotGrid');
   const availMsg     = document.getElementById('availMsg');
-  const availPanel   = document.getElementById('availPanel');
+  const addTimeDate  = document.getElementById('addTimeDate');
+  const addTimeTime  = document.getElementById('addTimeTime');
+  const addTimeBtn   = document.getElementById('addTimeBtn');
 
   availDate.value = todayISO();
+  addTimeDate.value = todayISO();
   availRefresh.addEventListener('click', loadSlotGrid);
-  availDate.addEventListener('change', loadSlotGrid);
-  // Lazy-load when the panel is first opened.
+  availDate.addEventListener('change', () => {
+    addTimeDate.value = availDate.value;
+    loadSlotGrid();
+  });
   availPanel.addEventListener('toggle', () => {
     if (availPanel.open) loadSlotGrid();
   });
+  addTimeBtn.addEventListener('click', addCustomTime);
 
-  // We need two things: the slot status (from /api/slots) AND the block IDs
-  // (from /api/blocks) so we can delete by id when unblocking.
   async function loadSlotGrid() {
     const date = availDate.value;
     if (!date) return;
@@ -413,35 +585,49 @@
     let slots = [];
     let blocks = [];
     let appointmentsByTime = {};
+    let customByTime = {};
     try {
-      const [slotsRes, blocksRes, apptRes] = await Promise.all([
+      const [slotsRes, blocksRes, apptRes, customRes] = await Promise.all([
         apiFetch('/api/slots?date=' + encodeURIComponent(date)),
         apiFetch('/api/blocks?date=' + encodeURIComponent(date)),
         apiFetch('/api/appointments?from=' + date + '&to=' + date),
+        apiFetch('/api/custom-slots?date=' + encodeURIComponent(date)),
       ]);
       slots  = (await slotsRes.json()).slots || [];
       blocks = (await blocksRes.json()).blocks || [];
       const appts = (await apptRes.json()).appointments || [];
       appointmentsByTime = Object.fromEntries(appts.map(a => [a.time, a]));
+      const customs = (await customRes.json()).slots || [];
+      customByTime = Object.fromEntries(customs.map((c) => [c.time, c]));
     } catch (e) {
       slotGrid.innerHTML = '<div class="empty" style="grid-column: 1/-1;">Couldn\'t load slot data.</div>';
       return;
     }
 
     if (slots.length === 0) {
-      slotGrid.innerHTML = '<div class="empty" style="grid-column: 1/-1;">No slots — please pick a weekday.</div>';
+      slotGrid.innerHTML =
+        '<div class="empty" style="grid-column: 1/-1;">No slots on this date. ' +
+        'Use <strong>Add times</strong> below to open one.</div>';
       return;
     }
 
     const blockByTime = Object.fromEntries(blocks.map(b => [b.time, b]));
     slotGrid.innerHTML = slots.map(s => {
       const appt = appointmentsByTime[s.time];
+      const isCustom = !!(s.custom || customByTime[s.time]);
       let sub = 'Available';
       if (s.status === 'booked' && appt) sub = esc(appt.name);
       else if (s.status === 'blocked') sub = 'Blocked';
+      else if (isCustom) sub = 'Custom';
+      const customId = customByTime[s.time] ? customByTime[s.time].id : '';
+      const removeBtn = (isCustom && s.status !== 'booked')
+        ? `<button class="remove" data-remove-custom="${customId}" title="Remove custom slot">×</button>`
+        : '';
       return `
-        <div class="slot ${s.status}" data-time="${esc(s.time)}" data-status="${esc(s.status)}"
+        <div class="slot ${s.status}${isCustom ? ' custom-slot' : ''}"
+             data-time="${esc(s.time)}" data-status="${esc(s.status)}"
              data-block-id="${blockByTime[s.time] ? blockByTime[s.time].id : ''}">
+          ${removeBtn}
           ${esc(s.time)}
           <span class="sub">${sub}</span>
         </div>
@@ -449,7 +635,27 @@
     }).join('');
 
     slotGrid.querySelectorAll('.slot').forEach((el) => {
-      el.addEventListener('click', () => handleSlotClick(el, date));
+      el.addEventListener('click', (ev) => {
+        // The "×" remove-custom button lives inside the slot; let it
+        // handle its own click without also toggling a block.
+        if (ev.target.closest('[data-remove-custom]')) return;
+        handleSlotClick(el, date);
+      });
+    });
+    slotGrid.querySelectorAll('[data-remove-custom]').forEach((btn) => {
+      btn.addEventListener('click', async (ev) => {
+        ev.stopPropagation();
+        const id = btn.dataset.removeCustom;
+        if (!id) return;
+        if (!confirm('Remove this custom time? Customers will no longer see it.')) return;
+        try {
+          await apiJson('/api/custom-slots/' + id, { method: 'DELETE' });
+          showMsg('Custom time removed.', 'ok');
+          loadSlotGrid();
+        } catch (err) {
+          showMsg(err.message || 'Failed to remove.', 'err');
+        }
+      });
     });
   }
 
@@ -469,13 +675,16 @@
   }
 
   async function blockSlot(date, time) {
-    const res = await apiFetch('/api/blocks', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ date, times: [time] }),
-    });
-    if (res.ok) showMsg(`Blocked ${time}.`, 'ok');
-    else showMsg(`Couldn't block ${time}.`, 'err');
+    try {
+      await apiJson('/api/blocks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date, times: [time] }),
+      });
+      showMsg(`Blocked ${time}.`, 'ok');
+    } catch (err) {
+      showMsg(`Couldn't block ${time}: ${err.message}`, 'err');
+    }
   }
 
   async function unblockSlot(date, time) {
@@ -483,6 +692,37 @@
     const res = await apiFetch(url, { method: 'DELETE' });
     if (res.ok) showMsg(`Unblocked ${time}.`, 'ok');
     else showMsg(`Couldn't unblock ${time}.`, 'err');
+  }
+
+  async function addCustomTime() {
+    const date = addTimeDate.value;
+    const time = addTimeTime.value;
+    if (!date) return showMsg('Pick a date first.', 'err');
+    if (!time) return showMsg('Pick a time first.', 'err');
+    // Normalize "9:00" or "09:00:00" to "HH:MM".
+    let hhmm = time;
+    const parts = time.split(':');
+    if (parts.length >= 2) {
+      hhmm = `${parts[0].padStart(2, '0')}:${parts[1]}`;
+    }
+    try {
+      await apiJson('/api/custom-slots', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date, time: hhmm }),
+      });
+      showMsg(`Added custom time ${hhmm} on ${date}.`, 'ok');
+      // If the date we just added matches the currently-viewed availability
+      // date, refresh the grid so the new slot shows up.
+      if (availDate.value === date) loadSlotGrid();
+      else {
+        // Otherwise, point the grid at the date the admin just modified.
+        availDate.value = date;
+        loadSlotGrid();
+      }
+    } catch (err) {
+      showMsg(err.message || 'Failed to add time.', 'err');
+    }
   }
 
   function showMsg(text, kind) {
@@ -496,9 +736,156 @@
     availMsg.textContent = '';
   }
 
+  /* ========================= USERS TAB ========================= */
+  const usersCountEl = document.getElementById('usersCount');
+  const userTable    = document.getElementById('userTable');
+  const userMsg      = document.getElementById('userMsg');
+  const newUsername  = document.getElementById('newUsername');
+  const newPassword  = document.getElementById('newPassword');
+  const newRole      = document.getElementById('newRole');
+  const addUserBtn   = document.getElementById('addUserBtn');
+
+  usersPanel.addEventListener('toggle', () => {
+    if (usersPanel.open) loadUsers();
+  });
+  addUserBtn.addEventListener('click', addUser);
+
+  async function loadUsers() {
+    userTable.innerHTML = '<div class="empty">Loading…</div>';
+    try {
+      const data = await apiJson('/api/users');
+      renderUsers(data.users || []);
+    } catch (err) {
+      userTable.innerHTML = `<div class="empty">Couldn't load users: ${esc(err.message)}</div>`;
+    }
+  }
+
+  function renderUsers(users) {
+    usersCountEl.textContent = users.length
+      ? `${users.length} user${users.length === 1 ? '' : 's'}`
+      : '';
+    if (users.length === 0) {
+      userTable.innerHTML =
+        '<div class="empty">No users yet. Add one above — or keep using the ' +
+        '<code>ADMIN_PASSWORD</code> root login.</div>';
+      return;
+    }
+    userTable.innerHTML = `
+      <table>
+        <thead>
+          <tr><th>Username</th><th>Role</th><th>Created</th><th></th></tr>
+        </thead>
+        <tbody>
+          ${users.map((u) => `
+            <tr data-uid="${u.id}">
+              <td>${esc(u.username)}</td>
+              <td>
+                <select data-role-for="${u.id}">
+                  <option value="viewer" ${u.role === 'viewer' ? 'selected' : ''}>Viewer</option>
+                  <option value="admin"  ${u.role === 'admin'  ? 'selected' : ''}>Admin</option>
+                </select>
+              </td>
+              <td class="muted">${esc(u.created_at || '')}</td>
+              <td>
+                <button class="ghost"  data-reset-pw="${u.id}" data-username="${esc(u.username)}">Reset password</button>
+                <button class="danger" data-delete-user="${u.id}" data-username="${esc(u.username)}">Delete</button>
+              </td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    `;
+    // Wire events.
+    userTable.querySelectorAll('[data-role-for]').forEach((sel) => {
+      sel.addEventListener('change', async () => {
+        const id = sel.dataset.roleFor;
+        const role = sel.value;
+        try {
+          await apiJson('/api/users/' + id, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ role }),
+          });
+          showUserMsg(`Role updated to "${role}".`, 'ok');
+        } catch (err) {
+          showUserMsg(err.message || 'Failed to update role.', 'err');
+          loadUsers();
+        }
+      });
+    });
+    userTable.querySelectorAll('[data-reset-pw]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const id = btn.dataset.resetPw;
+        const username = btn.dataset.username;
+        const pw = prompt(`New password for "${username}" (at least 6 chars):`);
+        if (pw == null) return;
+        try {
+          await apiJson('/api/users/' + id, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ password: pw }),
+          });
+          showUserMsg(`Password reset for "${username}". They'll need to sign in again.`, 'ok');
+        } catch (err) {
+          showUserMsg(err.message || 'Failed to reset password.', 'err');
+        }
+      });
+    });
+    userTable.querySelectorAll('[data-delete-user]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const id = btn.dataset.deleteUser;
+        const username = btn.dataset.username;
+        if (!confirm(`Delete user "${username}"? This cannot be undone.`)) return;
+        try {
+          await apiJson('/api/users/' + id, { method: 'DELETE' });
+          showUserMsg(`Deleted "${username}".`, 'ok');
+          loadUsers();
+        } catch (err) {
+          showUserMsg(err.message || 'Failed to delete.', 'err');
+        }
+      });
+    });
+  }
+
+  async function addUser() {
+    const username = newUsername.value.trim();
+    const password = newPassword.value;
+    const role = newRole.value;
+    if (!username || !password) {
+      return showUserMsg('Username and password are required.', 'err');
+    }
+    try {
+      await apiJson('/api/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password, role }),
+      });
+      newUsername.value = '';
+      newPassword.value = '';
+      newRole.value = 'viewer';
+      showUserMsg(`Added user "${username}" as ${role}.`, 'ok');
+      loadUsers();
+    } catch (err) {
+      showUserMsg(err.message || 'Failed to add user.', 'err');
+    }
+  }
+
+  function showUserMsg(text, kind) {
+    userMsg.className = 'toast ' + (kind === 'err' ? 'err' : 'ok');
+    userMsg.textContent = text;
+    clearTimeout(showUserMsg._t);
+    showUserMsg._t = setTimeout(() => {
+      userMsg.className = '';
+      userMsg.textContent = '';
+    }, 3500);
+  }
+
   /* ---------- initial load ---------- */
-  renderChips();
-  loadAppointments();
+  (async function init() {
+    await loadMe();
+    renderChips();
+    loadAppointments();
+  })();
 </script>
 </body>
 </html>
