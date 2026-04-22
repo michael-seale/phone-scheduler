@@ -31,6 +31,14 @@ services:
       - key: NODE_VERSION
         value: "22"
 
+      # Run the server in Eastern Time. scheduler-client.js uses
+      # Date.getDay()/getHours(), which return the process's local time —
+      # so we need the process clock to be ET for the lookups to land in
+      # the correct schedule slot. (nowET() in server.js is still explicit
+      # about ET and works regardless, so this change is safe.)
+      - key: TZ
+        value: America/New_York
+
       # Admin password for the /admin page. `sync: false` means Render will
       # prompt you to enter a value in the dashboard on first deploy and
       # keep it private — never stored in this YAML / in git.
@@ -71,3 +79,21 @@ services:
       # Where the notification email lands.
       - key: NOTIFY_TO
         value: support@renewedvision.com
+
+      # ---- RenewedVision Scheduler (who's-on-phones lookup) ----
+      # The server reads `lib/scheduler-client.js` from the repo at startup
+      # and runs it in a sandbox to get the RenewedVisionScheduler global.
+      # Leaving binId or apiKey blank disables the lookup (booking still works).
+      - key: RV_SCHEDULER_BIN_ID
+        sync: false
+      - key: RV_SCHEDULER_API_KEY
+        sync: false
+
+      # Group name passed to whoIsOn(). Defaults to "Phone Group".
+      - key: RV_SCHEDULER_GROUP
+        value: Phone Group
+
+      # Override the path to scheduler-client.js if you put it somewhere
+      # other than ./lib/scheduler-client.js. Usually unset.
+      # - key: RV_SCHEDULER_CLIENT_PATH
+      #   value: /var/data/scheduler-client.js

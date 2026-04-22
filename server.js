@@ -39,6 +39,8 @@ const express = require('express');
 const { DatabaseSync } = require('node:sqlite');
 const crypto = require('crypto');
 const path = require('path');
+const fs = require('node:fs');
+const vm = require('node:vm');
 const nodemailer = require('nodemailer');
 
 const PORT = process.env.PORT || 3000;
@@ -67,6 +69,92 @@ if (SMTP_USER && SMTP_PASS) {
     secure: SMTP_PORT === 465, // true for 465, false for 587/STARTTLS
     auth: { user: SMTP_USER, pass: SMTP_PASS },
   });
+}
+
+// ---- RenewedVision Scheduler integration --------------------------------
+// At booking time we look up who's on phones at the appointment and include
+// that person's name in the notification email.
+//
+// `scheduler-client.js` is a browser-only script that exposes a global
+// `window.RenewedVisionScheduler`. We load it server-side by reading the
+// file and executing it inside a Node `vm` context with a stubbed window
+// and browser-ish globals (fetch, URL, etc. — all built into Node 18+).
+//
+// The integration is OPTIONAL. If the file is missing, or the binId/apiKey
+// envvars are unset, we skip silently — booking still works.
+//
+// Env vars:
+//   RV_SCHEDULER_CLIENT_PATH  — path to scheduler-client.js
+//                               (default: "./lib/scheduler-client.js")
+//   RV_SCHEDULER_BIN_ID       — from the scheduler HTML snippet  (sync:false)
+//   RV_SCHEDULER_API_KEY      — from the scheduler HTML snippet  (sync:false)
+//   RV_SCHEDULER_GROUP        — which group to query (default "Phone Group")
+const RV_BIN_ID      = process.env.RV_SCHEDULER_BIN_ID || '';
+const RV_API_KEY     = process.env.RV_SCHEDULER_API_KEY || '';
+const RV_GROUP       = process.env.RV_SCHEDULER_GROUP || 'Phone Group';
+const RV_CLIENT_PATH = process.env.RV_SCHEDULER_CLIENT_PATH
+  || path.join(__dirname, 'lib', 'scheduler-client.js');
+
+/**
+ * Load `scheduler-client.js` in a sandboxed Node vm context and return the
+ * RenewedVisionScheduler global it exposes. Returns null if the file is
+ * missing or doesn't expose the expected global.
+ */
+function loadRvSchedulerClient(filePath) {
+  if (!fs.existsSync(filePath)) {
+    console.warn(`[rv-sched] client file not found at ${filePath} — skipping`);
+    console.warn('[rv-sched] drop scheduler-client.js into ./lib/ (or set RV_SCHEDULER_CLIENT_PATH)');
+    return null;
+  }
+  const code = fs.readFileSync(filePath, 'utf8');
+
+  // Browser-ish sandbox. Node 18+ provides fetch, URL, atob, AbortController,
+  // TextEncoder/Decoder as globals, so we just re-expose them. `window` and
+  // `self` point at the sandbox object itself so UMD-style scripts work.
+  const sandbox = {
+    console,
+    fetch, Headers, Request, Response,
+    URL, URLSearchParams,
+    atob, btoa,
+    setTimeout, clearTimeout, setInterval, clearInterval,
+    queueMicrotask,
+    Promise, Date, Math, JSON, Object, Array, Error, Symbol, Map, Set, WeakMap, WeakSet,
+    AbortController, AbortSignal,
+    TextEncoder, TextDecoder,
+    Intl,
+  };
+  sandbox.window = sandbox;
+  sandbox.self = sandbox;
+  sandbox.globalThis = sandbox;
+
+  vm.createContext(sandbox);
+  try {
+    vm.runInContext(code, sandbox, { filename: path.basename(filePath) });
+  } catch (err) {
+    console.error(`[rv-sched] error running client script: ${err.message}`);
+    return null;
+  }
+  const Rvs =
+    sandbox.RenewedVisionScheduler ||
+    (sandbox.window && sandbox.window.RenewedVisionScheduler);
+  if (!Rvs || typeof Rvs.create !== 'function') {
+    console.warn('[rv-sched] client script loaded but exposed no RenewedVisionScheduler.create()');
+    return null;
+  }
+  return Rvs;
+}
+
+let rvScheduler = null;
+if (RV_BIN_ID && RV_API_KEY) {
+  const Rvs = loadRvSchedulerClient(RV_CLIENT_PATH);
+  if (Rvs) {
+    try {
+      rvScheduler = Rvs.create({ binId: RV_BIN_ID, apiKey: RV_API_KEY });
+      console.log(`[rv-sched] connected using ${RV_CLIENT_PATH}`);
+    } catch (err) {
+      console.error(`[rv-sched] create() threw: ${err.message}`);
+    }
+  }
 }
 
 // ---- Slot configuration --------------------------------------------------
@@ -161,6 +249,60 @@ function formatPrettyTime(timeStr) {
 }
 
 /**
+ * Return an ISO-8601 string for the given (YYYY-MM-DD, HH:MM) interpreted
+ * as Eastern Time — e.g. "2026-04-27T14:00:00-04:00".
+ * Uses Intl to figure out whether ET is on EST (-05:00) or EDT (-04:00).
+ */
+function etIsoString(dateStr, timeStr) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const anchor = new Date(Date.UTC(y, m - 1, d, 12, 0));
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    timeZoneName: 'shortOffset',
+  }).formatToParts(anchor);
+  const off = (parts.find((p) => p.type === 'timeZoneName') || {}).value || 'GMT-5';
+  const match = off.match(/GMT([+-])(\d{1,2})(?::?(\d{2}))?/);
+  const sign = match ? match[1] : '-';
+  const hh = match ? match[2].padStart(2, '0') : '05';
+  const mm = match && match[3] ? match[3] : '00';
+  return `${dateStr}T${timeStr}:00${sign}${hh}:${mm}`;
+}
+
+/**
+ * Ask the RenewedVision scheduler who's on phones at the appointment time.
+ * Returns a rep name, or null if the lookup isn't configured or fails.
+ */
+async function lookupAssignedRep(appt) {
+  if (!rvScheduler) return null;
+  try {
+    // scheduler-client.js uses Date.getDay()/getHours() (process-local time),
+    // so we build a local-time Date from the appointment's YYYY-MM-DD / HH:MM
+    // components. This is correct as long as the process TZ is set to
+    // America/New_York (see TZ env var in render.yaml).
+    const [y, mo, d] = appt.date.split('-').map(Number);
+    const [hh, mm] = appt.time.split(':').map(Number);
+    const when = new Date(y, mo - 1, d, hh, mm, 0);
+
+    const result = await rvScheduler.whoIsOn({
+      group: RV_GROUP,
+      time:  when,
+    });
+    const names = result && Array.isArray(result.names) ? result.names : [];
+    if (names.length === 0) {
+      if (result && result.reason) {
+        console.log(`[rv-sched] appt #${appt.id}: no match (${result.reason})`);
+      }
+      return null;
+    }
+    console.log(`[rv-sched] appt #${appt.id} assigned to ${names[0]}`);
+    return names[0];
+  } catch (err) {
+    console.error('[rv-sched] whoIsOn failed:', err.message);
+    return null;
+  }
+}
+
+/**
  * Send the booking-notification email. Fire-and-forget: any failure is
  * logged but NEVER blocks or fails the HTTP response to the customer.
  */
@@ -173,6 +315,10 @@ async function sendBookingNotification(appt) {
   const prettyTime = formatPrettyTime(appt.time);
   const subject = `New Event: ${appt.name} on ${prettyDate} at ${prettyTime}`;
 
+  // Figure out who's on phones at that time. Non-blocking for booking —
+  // if this fails, we still send the email (without the rep line).
+  const assignedRep = await lookupAssignedRep(appt);
+
   const lines = [
     `A new appointment has been booked.`,
     ``,
@@ -182,6 +328,7 @@ async function sendBookingNotification(appt) {
     `Software version: ${appt.software_version || '(not provided)'}`,
     `Date:             ${prettyDate}`,
     `Time:             ${prettyTime} Eastern`,
+    `Assigned rep:     ${assignedRep || '(not configured / no one scheduled)'}`,
     `Source:           ${appt.source}`,
     `Confirmation #:   ${appt.id}`,
     ``,
