@@ -249,13 +249,19 @@ async function createZendeskTicket(appt) {
 }
 
 /**
- * Append an internal comment to an existing Zendesk ticket, optionally
- * transitioning it to a specific status (e.g. 'solved', 'open'). Silent
- * no-op if the integration is disabled or the ticket id is missing.
+ * Append a comment to an existing Zendesk ticket, optionally transitioning
+ * it to a specific status. Comments default to INTERNAL. Set `isPublic: true`
+ * to make the comment customer-facing — Zendesk then fires its own
+ * notification trigger that emails the requester. Returns true on
+ * success, false on any failure (disabled, missing id, API error).
  */
-async function appendZendeskComment(ticketId, body, { status } = {}) {
-  if (!zendeskEnabled || !ticketId) return;
-  const ticket = { comment: { body, public: false } };
+async function appendZendeskComment(
+  ticketId,
+  body,
+  { status, isPublic = false } = {}
+) {
+  if (!zendeskEnabled || !ticketId) return false;
+  const ticket = { comment: { body, public: !!isPublic } };
   if (status) ticket.status = status;
   try {
     const res = await fetch(zendeskUrl(`/tickets/${ticketId}.json`), {
@@ -271,14 +277,16 @@ async function appendZendeskComment(ticketId, body, { status } = {}) {
       console.error(
         `[zendesk] ticket update #${ticketId} failed: ${res.status} ${text}`
       );
-      return;
+      return false;
     }
     console.log(
-      `[zendesk] commented on ticket #${ticketId}` +
+      `[zendesk] ${isPublic ? 'public ' : ''}commented on ticket #${ticketId}` +
         (status ? ` (status → ${status})` : '')
     );
+    return true;
   } catch (e) {
     console.error('[zendesk] ticket update threw:', e.message);
+    return false;
   }
 }
 
@@ -825,10 +833,123 @@ async function sendCustomerConfirmation(appt) {
   }
 }
 
-// (The support@ notification email was replaced by Zendesk ticket creation
-//  — see createZendeskTicket() above. The NOTIFY_TO / NOTIFY_FROM env vars
-//  are no longer used, but we leave them in render.yaml as deprecated for
-//  now so existing deployments don't break on the first redeploy.)
+/**
+ * Compose the customer-facing cancellation body. Used for:
+ *   - the PUBLIC Zendesk comment (Zendesk fires its own email on post)
+ *   - the SMTP fallback when no ticket exists
+ * Kept in one place so the wording stays consistent across paths.
+ */
+function buildCancellationBody(appt, reason) {
+  const whenLine = formatWhenForCustomer(appt.date, appt.time, appt.timezone);
+  const firstName = String(appt.name || '').split(/\s+/)[0] || 'there';
+  return [
+    `Hi ${firstName},`,
+    ``,
+    `Your phone appointment on ${whenLine} has been canceled.`,
+    ``,
+    `Reason: ${String(reason || '').trim() || '(no reason given)'}`,
+    ``,
+    `If this was a mistake, just reply to this message and our support team will help.`,
+    ``,
+    `— Renewed Vision Support`,
+  ].join('\n');
+}
+
+/**
+ * Notify the customer that their appointment was canceled. Preferred path
+ * is a PUBLIC Zendesk comment (Zendesk emails the requester automatically,
+ * keeps the conversation threaded in one ticket, and gives us better
+ * deliverability). Falls back to direct SMTP mail when Zendesk isn't
+ * available for this appointment (integration disabled, or the appointment
+ * has no ticket id — e.g. rows booked before Zendesk was configured).
+ *
+ * Returns a short string describing the path taken, handy for logs:
+ *   'zendesk' | 'email' | 'skipped'
+ */
+async function notifyCustomerOfCancellation(appt, reason, { status } = {}) {
+  const body = buildCancellationBody(appt, reason);
+  if (zendeskEnabled && appt.zendesk_ticket_id) {
+    const ok = await appendZendeskComment(appt.zendesk_ticket_id, body, {
+      status,
+      isPublic: true,
+    });
+    if (ok) return 'zendesk';
+    // Fall through to email if the API call failed — at least the customer
+    // still gets notified.
+  }
+  if (mailer) {
+    await sendCustomerCancellation(appt, reason);
+    return 'email';
+  }
+  console.warn(
+    `[cancel] appt #${appt.id}: no Zendesk ticket and no SMTP — customer not notified`
+  );
+  return 'skipped';
+}
+
+/**
+ * Send a cancellation email to the customer. Fallback path, only used when
+ * no Zendesk ticket is available for the appointment. Primary path is now
+ * a public Zendesk comment — see notifyCustomerOfCancellation above.
+ *
+ * Fire-and-forget: failures are logged but never thrown. Uses NOTIFY_FROM
+ * as the sender (Google Workspace rewrites this to the authenticated
+ * SMTP_USER if it differs), and NOTIFY_TO as Reply-To so a reply lands
+ * in the support inbox.
+ */
+async function sendCustomerCancellation(appt, reason) {
+  if (!mailer) return;
+  const safeReason = String(reason || '').trim();
+  const whenLine = formatWhenForCustomer(appt.date, appt.time, appt.timezone);
+  const firstName = String(appt.name || '').split(/\s+/)[0] || 'there';
+  const subject = `Your Phone Appointment has been canceled`;
+
+  const textLines = [
+    `Hi ${firstName},`,
+    ``,
+    `Your phone appointment on ${whenLine} has been canceled.`,
+    ``,
+    `Reason: ${safeReason || '(no reason given)'}`,
+    ``,
+    `If this was a mistake, just reply to this email and our support team will help.`,
+    ``,
+    `— Renewed Vision Support`,
+  ];
+
+  // HTML version — minimal, matches the confirmation email's voice.
+  const escHtml = (s) =>
+    String(s ?? '')
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const html = `
+    <div style="font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#222;line-height:1.5;max-width:560px;">
+      <p>Hi ${escHtml(firstName)},</p>
+      <p>Your phone appointment on <strong>${escHtml(whenLine)}</strong> has been canceled.</p>
+      <p><strong>Reason:</strong> ${escHtml(safeReason || '(no reason given)')}</p>
+      <p>If this was a mistake, just reply to this email and our support team will help.</p>
+      <p style="color:#666;margin-top:22px;">— Renewed Vision Support</p>
+    </div>
+  `;
+
+  try {
+    await mailer.sendMail({
+      from: NOTIFY_FROM,
+      to: appt.email,
+      replyTo: NOTIFY_TO, // replies go to support@
+      subject,
+      text: textLines.join('\n'),
+      html,
+    });
+    console.log(`[email] sent cancellation for appt #${appt.id} → ${appt.email}`);
+  } catch (err) {
+    console.error(`[email] cancellation send failed for appt #${appt.id}:`, err.message);
+  }
+}
+
+// (The support@ *notification* email that used to fire on new bookings
+//  was replaced by Zendesk ticket creation — see createZendeskTicket()
+//  above. NOTIFY_FROM / NOTIFY_TO are still used for the customer-facing
+//  confirmation and cancellation emails.)
 
 // ---- Database setup ------------------------------------------------------
 const db = new DatabaseSync(DB_PATH);
@@ -1595,15 +1716,17 @@ app.post('/cancel', (req, res) => {
     `[cancel] appt #${appt.id} canceled via token with reason: ${reason.slice(0, 200)}`
   );
 
-  // Zendesk: add an internal comment with the reason and reopen the
-  // ticket (status = 'open') so an agent is prompted to follow up.
-  if (appt.zendesk_ticket_id) {
-    appendZendeskComment(
-      appt.zendesk_ticket_id,
-      `This appointment has been cancelled for reason: ${reason}`,
-      { status: 'open' }
-    ).catch((e) => console.error('[zendesk] cancel comment error:', e));
-  }
+  // Single notification path: a PUBLIC Zendesk comment on the existing
+  // ticket, which Zendesk auto-emails to the requester. Status flips to
+  // 'open' so an agent picks up the follow-up. Falls back to direct
+  // email only if no ticket exists for this appointment.
+  notifyCustomerOfCancellation(appt, reason, { status: 'open' })
+    .then((path) =>
+      console.log(`[cancel] appt #${appt.id}: customer notified via ${path}`)
+    )
+    .catch((e) =>
+      console.error('[cancel] customer notification error:', e)
+    );
 
   res.redirect('/canceled.html?status=ok');
 });
@@ -1752,27 +1875,57 @@ app.get('/api/appointments', requireUser, (req, res) => {
   res.json({ appointments: rows });
 });
 
-// Cancel an appointment (admin-only).
+// Cancel an appointment (admin-only). Body must include { reason: string }.
+// The reason is shared with the customer (in the cancellation email) and
+// logged on the Zendesk ticket, so agents should treat it as visible.
 app.delete('/api/appointments/:id', requireAdmin, (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) {
     return res.status(400).json({ error: 'invalid id' });
   }
+  const body = req.body || {};
+  const reason = String(body.reason || '').trim();
+  if (!reason) {
+    return res.status(400).json({ error: 'reason is required' });
+  }
   // Grab the row BEFORE we delete it so we can drop a Zendesk cancel
-  // comment using the stored ticket id. (Once the row is gone, so is
-  // the id that links it to Zendesk.)
+  // comment using the stored ticket id and email the customer. (Once the
+  // row is gone, so are the fields we need.)
   const appt = stmtFindById.get(id);
   const result = stmtDelete.run(id);
   if (result.changes === 0) {
     return res.status(404).json({ error: 'not found' });
   }
-  if (appt && appt.zendesk_ticket_id) {
-    const who = (getSession(req) || {}).username || 'admin';
-    appendZendeskComment(
-      appt.zendesk_ticket_id,
-      `Appointment canceled by ${who} from the admin page on ${new Date().toISOString()}.`,
-      { status: 'solved' }
-    ).catch((e) => console.error('[zendesk] admin cancel comment error:', e));
+  const who = (getSession(req) || {}).username || 'admin';
+  console.log(
+    `[cancel] appt #${id} canceled by admin (${who}) with reason: ${reason.slice(0, 200)}`
+  );
+
+  if (appt) {
+    // Two Zendesk updates (fire-and-forget):
+    //   1. INTERNAL audit note — which admin canceled. Kept private so it
+    //      doesn't appear in the customer's email.
+    //   2. PUBLIC customer-facing comment — Zendesk fires its own
+    //      notification trigger, emailing the requester. Also transitions
+    //      the ticket to 'solved' since this is a final disposition from
+    //      the team (differs from the customer-initiated cancel which
+    //      reopens the ticket).
+    // If no ticket id exists (rare — pre-Zendesk rows), the public
+    // notification falls back to direct email inside notifyCustomer*.
+    if (appt.zendesk_ticket_id) {
+      appendZendeskComment(
+        appt.zendesk_ticket_id,
+        `Canceled by ${who} from the admin page.`,
+        { isPublic: false }
+      ).catch((e) => console.error('[zendesk] admin audit note error:', e));
+    }
+    notifyCustomerOfCancellation(appt, reason, { status: 'solved' })
+      .then((path) =>
+        console.log(`[cancel] appt #${id}: customer notified via ${path}`)
+      )
+      .catch((e) =>
+        console.error('[cancel] admin customer notification error:', e)
+      );
   }
   res.json({ ok: true });
 });
