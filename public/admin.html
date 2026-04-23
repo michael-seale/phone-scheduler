@@ -97,27 +97,6 @@
     .subsection { margin-top: 20px; }
     .subsection h3 { margin: 0 0 8px; font-size: 14px; font-weight: 600; color: var(--ink); }
 
-    /* Date chips */
-    .chips {
-      display: flex; flex-wrap: wrap; gap: 6px;
-      margin-top: 10px;
-    }
-    .chip {
-      display: inline-flex; align-items: center; gap: 6px;
-      background: var(--accent-weak);
-      color: var(--accent);
-      border-radius: 999px;
-      padding: 4px 10px 4px 12px;
-      font-size: 13px;
-      font-weight: 600;
-    }
-    .chip button {
-      background: none; border: 0; padding: 0 0 0 2px;
-      color: var(--accent);
-      font-size: 15px; line-height: 1;
-      cursor: pointer;
-    }
-
     /* Appointments table */
     table { width: 100%; border-collapse: collapse; }
     th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--border); font-size: 14px; vertical-align: top; }
@@ -131,6 +110,59 @@
     .pill.custom { background: #fff3e0; color: var(--warn); margin-left: 6px; font-size: 10px; }
     .notes { max-width: 280px; white-space: pre-wrap; }
     .empty { padding: 28px; text-align: center; color: var(--muted); }
+
+    /* Week navigation bar (Appointments + Availability) */
+    .week-nav-row {
+      justify-content: space-between;
+      margin-bottom: 6px;
+    }
+    .week-nav {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .week-nav .arrow {
+      padding: 6px 12px;
+      font-size: 16px;
+      line-height: 1;
+      font-family: inherit;
+    }
+    .week-nav .week-label {
+      font-weight: 600;
+      font-size: 15px;
+      color: var(--ink);
+      min-width: 210px;
+      text-align: center;
+      padding: 0 8px;
+    }
+    .week-right {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    /* Per-day sections inside a week view */
+    .day-section { margin-top: 22px; }
+    .day-section:first-child { margin-top: 4px; }
+    .day-header {
+      margin: 0 0 10px;
+      padding: 4px 0 8px;
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--ink);
+      border-bottom: 2px solid var(--accent-weak);
+    }
+    .day-header.today {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+    .empty-day {
+      padding: 14px 4px;
+      color: var(--muted);
+      font-size: 13px;
+      font-style: italic;
+    }
 
     /* "My appointments only" toggle */
     .toggle {
@@ -279,23 +311,25 @@
         <span class="muted" id="apptCount"></span>
       </summary>
       <div class="panel-body">
-        <div class="row controls">
-          <label class="muted" for="addDate">Add date</label>
-          <input type="date" id="addDate" />
-          <button id="addDateBtn" class="primary">Add</button>
-          <button id="showAllBtn" class="ghost">Show all upcoming</button>
-          <button id="refreshApptBtn" class="ghost">Refresh</button>
-
-          <!-- Only rendered when the signed-in user has a full_name set.
-               Filters the table to rows where the scheduler's assigned rep
-               matches the user's full name (case-insensitive). -->
-          <label id="mineToggle" class="toggle" hidden>
-            <input type="checkbox" id="mineCheckbox" />
-            My appointments only
-          </label>
+        <div class="row controls week-nav-row">
+          <div class="week-nav">
+            <button id="apptWeekPrev" class="ghost arrow" title="Previous week">◀</button>
+            <div class="week-label" id="apptWeekLabel">—</div>
+            <button id="apptWeekNext" class="ghost arrow" title="Next week">▶</button>
+            <button id="apptWeekToday" class="ghost">Today</button>
+          </div>
+          <div class="week-right">
+            <button id="refreshApptBtn" class="ghost">Refresh</button>
+            <!-- Only rendered when the signed-in user has a full_name set.
+                 Filters the table to rows where the scheduler's assigned rep
+                 matches the user's full name (case-insensitive). -->
+            <label id="mineToggle" class="toggle" hidden>
+              <input type="checkbox" id="mineCheckbox" />
+              My appointments only
+            </label>
+          </div>
         </div>
-        <div class="chips" id="dateChips"></div>
-        <div id="apptTable" style="margin-top: 14px;">
+        <div id="apptWeekView">
           <div class="empty">Loading…</div>
         </div>
       </div>
@@ -308,10 +342,16 @@
         <span class="muted">Block off slots or add extra times</span>
       </summary>
       <div class="panel-body">
-        <div class="row controls">
-          <label class="muted" for="availDate">Date</label>
-          <input type="date" id="availDate" />
-          <button id="availRefresh" class="ghost">Refresh</button>
+        <div class="row controls week-nav-row">
+          <div class="week-nav">
+            <button id="availWeekPrev" class="ghost arrow" title="Previous week">◀</button>
+            <div class="week-label" id="availWeekLabel">—</div>
+            <button id="availWeekNext" class="ghost arrow" title="Next week">▶</button>
+            <button id="availWeekToday" class="ghost">Today</button>
+          </div>
+          <div class="week-right">
+            <button id="availRefresh" class="ghost">Refresh</button>
+          </div>
         </div>
         <div class="legend">
           <span><span class="dot available"></span>Available (click to block)</span>
@@ -319,7 +359,9 @@
           <span><span class="dot blocked"></span>Blocked (click to unblock)</span>
           <span><span class="dot custom"></span>Custom (×&nbsp;to remove)</span>
         </div>
-        <div id="slotGrid" class="slot-grid"></div>
+        <div id="availWeekView">
+          <div class="empty">Loading…</div>
+        </div>
         <div id="availMsg"></div>
 
         <div class="subsection">
@@ -476,86 +518,127 @@
     return `https://${currentUser.zendesk_subdomain}.zendesk.com/agent/tickets/${ticketId}`;
   }
 
-  /* ====================== APPOINTMENTS TAB ===================== */
-  const addDate = document.getElementById('addDate');
-  const addDateBtn = document.getElementById('addDateBtn');
-  const showAllBtn = document.getElementById('showAllBtn');
-  const refreshApptBtn = document.getElementById('refreshApptBtn');
-  const dateChips = document.getElementById('dateChips');
-  const apptTable = document.getElementById('apptTable');
-  const apptCount = document.getElementById('apptCount');
-  const mineToggle = document.getElementById('mineToggle');
-  const mineCheckbox = document.getElementById('mineCheckbox');
+  /* ====================== WEEK-VIEW HELPERS ==================== */
+  // Both the Appointments and Availability tabs render as a Mon–Fri week
+  // with per-day headers. The week is identified by the Monday date.
+  function parseYmd(s) {
+    const [y, m, d] = s.split('-').map(Number);
+    return new Date(y, m - 1, d);
+  }
+  function fmtYmd(d) {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${dd}`;
+  }
+  function addDays(ymd, n) {
+    const d = parseYmd(ymd); d.setDate(d.getDate() + n); return fmtYmd(d);
+  }
+  function getMondayOf(ymd) {
+    const d = parseYmd(ymd);
+    const dow = d.getDay(); // 0=Sun, 1=Mon, ..., 6=Sat
+    const delta = dow === 0 ? -6 : 1 - dow;
+    d.setDate(d.getDate() + delta);
+    return fmtYmd(d);
+  }
+  function fmtDayHeader(ymd) {
+    return parseYmd(ymd).toLocaleDateString('en-US', {
+      weekday: 'long', month: 'long', day: 'numeric',
+    });
+  }
+  function fmtWeekLabel(weekMonday) {
+    const start = parseYmd(weekMonday);
+    const end   = parseYmd(addDays(weekMonday, 4));
+    const sameMonth = start.getMonth() === end.getMonth();
+    const startStr = start.toLocaleDateString('en-US', { month: 'long', day: 'numeric' });
+    const endStr = sameMonth
+      ? end.toLocaleDateString('en-US', { day: 'numeric' })
+      : end.toLocaleDateString('en-US', { month: 'long', day: 'numeric' });
+    return `${startStr} – ${endStr}, ${end.getFullYear()}`;
+  }
+  /**
+   * Days rendered for a given week. On the current week we skip days that
+   * have already passed so on Wed you see Wed–Fri (per product spec). On
+   * any other week we show the full Mon–Fri. On weekends we don't clip at
+   * all — the initial week on Sat/Sun is next Monday's week (see
+   * initialWeekMonday below), so showing the whole Mon–Fri is correct.
+   */
+  function daysInView(weekMonday) {
+    const today = todayISO();
+    const dow = parseYmd(today).getDay(); // 0=Sun..6=Sat
+    const isWorkday = dow >= 1 && dow <= 5;
+    const todayMon = getMondayOf(today);
+    const days = [];
+    for (let i = 0; i < 5; i++) {
+      const d = addDays(weekMonday, i);
+      if (isWorkday && weekMonday === todayMon && d < today) continue;
+      days.push(d);
+    }
+    return days;
+  }
+  /**
+   * Which Monday the two tabs should default to on page load. On weekends
+   * this is "next Monday" so the admin isn't staring at an empty page.
+   */
+  function initialWeekMonday() {
+    const today = todayISO();
+    const dow = parseYmd(today).getDay();
+    if (dow === 0) return getMondayOf(addDays(today, 1)); // Sun → next Mon
+    if (dow === 6) return getMondayOf(addDays(today, 2)); // Sat → next Mon
+    return getMondayOf(today);
+  }
 
-  // When the checkbox flips, just re-render from the already-fetched rows.
+  /* ====================== APPOINTMENTS TAB ===================== */
+  const refreshApptBtn = document.getElementById('refreshApptBtn');
+  const apptWeekView   = document.getElementById('apptWeekView');
+  const apptCount      = document.getElementById('apptCount');
+  const apptWeekLabel  = document.getElementById('apptWeekLabel');
+  const apptWeekPrev   = document.getElementById('apptWeekPrev');
+  const apptWeekNext   = document.getElementById('apptWeekNext');
+  const apptWeekToday  = document.getElementById('apptWeekToday');
+  const mineToggle     = document.getElementById('mineToggle');
+  const mineCheckbox   = document.getElementById('mineCheckbox');
+
+  let apptWeekMonday = initialWeekMonday();
   let lastRows = [];
+
+  apptWeekPrev.addEventListener('click', () => {
+    apptWeekMonday = addDays(apptWeekMonday, -7);
+    loadAppointments();
+  });
+  apptWeekNext.addEventListener('click', () => {
+    apptWeekMonday = addDays(apptWeekMonday, 7);
+    loadAppointments();
+  });
+  apptWeekToday.addEventListener('click', () => {
+    apptWeekMonday = getMondayOf(todayISO());
+    loadAppointments();
+  });
+  refreshApptBtn.addEventListener('click', loadAppointments);
+
+  // When the "My appointments only" checkbox flips, just re-render from
+  // the already-fetched rows.
   mineCheckbox.addEventListener('change', () => {
     mineToggle.classList.toggle('on', mineCheckbox.checked);
     renderAppointments(lastRows);
   });
 
-  // Selected dates (a Set of YYYY-MM-DD). Empty = "show all upcoming".
-  const selectedDates = new Set();
-  addDate.value = todayISO();
-
-  addDateBtn.addEventListener('click', () => {
-    if (!addDate.value) return;
-    selectedDates.add(addDate.value);
-    renderChips();
-    loadAppointments();
-  });
-  showAllBtn.addEventListener('click', () => {
-    selectedDates.clear();
-    renderChips();
-    loadAppointments();
-  });
-  refreshApptBtn.addEventListener('click', loadAppointments);
-
-  function renderChips() {
-    const dates = [...selectedDates].sort();
-    if (dates.length === 0) {
-      dateChips.innerHTML = '<span class="muted">Showing all upcoming appointments.</span>';
+  async function loadAppointments() {
+    apptWeekLabel.textContent = fmtWeekLabel(apptWeekMonday);
+    apptWeekView.innerHTML = '<div class="empty">Loading…</div>';
+    const days = daysInView(apptWeekMonday);
+    if (days.length === 0) {
+      apptWeekView.innerHTML = '<div class="empty">No workdays in this week view.</div>';
       return;
     }
-    dateChips.innerHTML = dates.map(d =>
-      `<span class="chip">${esc(d)} <button data-remove="${esc(d)}" title="Remove">×</button></span>`
-    ).join('');
-    dateChips.querySelectorAll('[data-remove]').forEach(b => {
-      b.addEventListener('click', () => {
-        selectedDates.delete(b.dataset.remove);
-        renderChips();
-        loadAppointments();
-      });
-    });
-  }
-
-  async function loadAppointments() {
-    apptTable.innerHTML = '<div class="empty">Loading…</div>';
+    const from = days[0];
+    const to   = days[days.length - 1];
     let rows = [];
     try {
-      if (selectedDates.size === 0) {
-        const today = todayISO();
-        const far  = '2099-12-31';
-        const res = await apiFetch(`/api/appointments?from=${today}&to=${far}`);
-        rows = (await res.json()).appointments || [];
-      } else {
-        const dates = [...selectedDates];
-        const results = await Promise.all(dates.map(async (d) => {
-          const r = await apiFetch(`/api/appointments?from=${d}&to=${d}`);
-          return (await r.json()).appointments || [];
-        }));
-        const seen = new Set();
-        rows = results.flat().filter((a) => {
-          if (seen.has(a.id)) return false;
-          seen.add(a.id);
-          return true;
-        });
-        rows.sort((a, b) =>
-          a.date === b.date ? a.time.localeCompare(b.time) : a.date.localeCompare(b.date)
-        );
-      }
+      const res = await apiFetch(`/api/appointments?from=${from}&to=${to}`);
+      rows = (await res.json()).appointments || [];
     } catch (e) {
-      apptTable.innerHTML = '<div class="empty">Couldn\'t load appointments.</div>';
+      apptWeekView.innerHTML = '<div class="empty">Couldn\'t load appointments.</div>';
       return;
     }
     lastRows = rows;
@@ -571,76 +654,106 @@
         (r) => r.assigned_rep && r.assigned_rep.trim().toLowerCase() === me
       );
     }
-
-    const totalText = allRows.length
+    apptCount.textContent = allRows.length
       ? `${rows.length}${rows.length !== allRows.length ? ' / ' + allRows.length : ''}` +
         ` appointment${rows.length === 1 ? '' : 's'}`
       : '';
-    apptCount.textContent = totalText;
 
-    if (rows.length === 0) {
-      const emptyMsg = mineCheckbox.checked
-        ? `No appointments assigned to ${esc(currentUser.full_name)} in this range.`
-        : 'No appointments for the selected dates.';
-      apptTable.innerHTML = `<div class="empty">${emptyMsg}</div>`;
-      return;
+    const days = daysInView(apptWeekMonday);
+    const todayYmd = todayISO();
+
+    // Group filtered rows by date so we can render a section per day.
+    const byDate = {};
+    for (const r of rows) {
+      (byDate[r.date] || (byDate[r.date] = [])).push(r);
     }
-    // Viewers don't get a Cancel button — that's an admin action.
+    // Each day's rows sorted by time.
+    for (const k of Object.keys(byDate)) {
+      byDate[k].sort((a, b) => a.time.localeCompare(b.time));
+    }
+
     const showCancel = currentUser.role === 'admin';
-    apptTable.innerHTML = `
-      <table>
-        <thead>
-          <tr>
-            <th>Date</th>
-            <th>Time</th>
-            <th>Name</th>
-            <th>Email</th>
-            <th>Phone</th>
-            <th>Source</th>
-            <th>Zendesk</th>
-            <th>Assignee</th>
-            ${showCancel ? '<th></th>' : ''}
+    const sections = days.map((date) => {
+      const dayRows = byDate[date] || [];
+      const headerCls = date === todayYmd ? ' today' : '';
+      const header = `<h3 class="day-header${headerCls}">${esc(fmtDayHeader(date))}</h3>`;
+      if (dayRows.length === 0) {
+        const msg = (mineCheckbox.checked && currentUser.full_name)
+          ? `No appointments assigned to ${esc(currentUser.full_name)}.`
+          : 'No appointments.';
+        return `<div class="day-section">${header}<div class="empty-day">${msg}</div></div>`;
+      }
+      const tbody = dayRows.map((r) => {
+        const ticketUrl = zendeskTicketUrl(r.zendesk_ticket_id);
+        const ticketCell = r.zendesk_ticket_id
+          ? (ticketUrl
+              ? `<a class="ticket-link" href="${esc(ticketUrl)}" target="_blank" rel="noopener">#${esc(r.zendesk_ticket_id)}</a>`
+              : `<span class="ticket-link">#${esc(r.zendesk_ticket_id)}</span>`)
+          : '<span class="muted">—</span>';
+        const assigneeCell = r.assigned_rep
+          ? esc(r.assigned_rep)
+          : '<span class="muted">—</span>';
+        return `
+          <tr data-id="${r.id}">
+            <td><strong>${esc(r.time)}</strong></td>
+            <td>${esc(r.name)}</td>
+            <td><a href="mailto:${esc(r.email)}">${esc(r.email)}</a></td>
+            <td>${esc(r.phone)}</td>
+            <td><span class="pill ${r.source === 'api' ? 'api' : 'web'}">${esc(r.source)}</span></td>
+            <td>${ticketCell}</td>
+            <td>${assigneeCell}</td>
+            ${showCancel ? `<td><button class="danger" data-cancel="${r.id}">Cancel</button></td>` : ''}
           </tr>
-        </thead>
-        <tbody>
-          ${rows.map(r => {
-            const ticketUrl = zendeskTicketUrl(r.zendesk_ticket_id);
-            const ticketCell = r.zendesk_ticket_id
-              ? (ticketUrl
-                  ? `<a class="ticket-link" href="${esc(ticketUrl)}" target="_blank" rel="noopener">#${esc(r.zendesk_ticket_id)}</a>`
-                  : `<span class="ticket-link">#${esc(r.zendesk_ticket_id)}</span>`)
-              : '<span class="muted">—</span>';
-            const assigneeCell = r.assigned_rep
-              ? esc(r.assigned_rep)
-              : '<span class="muted">—</span>';
-            return `
-              <tr data-id="${r.id}">
-                <td>${esc(r.date)}</td>
-                <td><strong>${esc(r.time)}</strong></td>
-                <td>${esc(r.name)}</td>
-                <td><a href="mailto:${esc(r.email)}">${esc(r.email)}</a></td>
-                <td>${esc(r.phone)}</td>
-                <td><span class="pill ${r.source === 'api' ? 'api' : 'web'}">${esc(r.source)}</span></td>
-                <td>${ticketCell}</td>
-                <td>${assigneeCell}</td>
-                ${showCancel ? `<td><button class="danger" data-cancel="${r.id}">Cancel</button></td>` : ''}
+        `;
+      }).join('');
+      return `
+        <div class="day-section">
+          ${header}
+          <table>
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Name</th>
+                <th>Email</th>
+                <th>Phone</th>
+                <th>Source</th>
+                <th>Zendesk</th>
+                <th>Assignee</th>
+                ${showCancel ? '<th></th>' : ''}
               </tr>
-            `;
-          }).join('')}
-        </tbody>
-      </table>
-    `;
+            </thead>
+            <tbody>${tbody}</tbody>
+          </table>
+        </div>
+      `;
+    }).join('');
+
+    apptWeekView.innerHTML = sections || '<div class="empty">No workdays in this week view.</div>';
+
     if (showCancel) {
-      apptTable.querySelectorAll('[data-cancel]').forEach((btn) => {
+      apptWeekView.querySelectorAll('[data-cancel]').forEach((btn) => {
         btn.addEventListener('click', async () => {
-          if (!confirm('Cancel this appointment?')) return;
+          // Reason is required — it goes into the customer's cancellation
+          // notification (via Zendesk public comment) and the audit trail.
+          const reason = prompt(
+            'Reason for cancellation (shown to the customer in their email and logged in Zendesk):'
+          );
+          if (reason === null) return;
+          if (!reason.trim()) {
+            alert('A reason is required to cancel.');
+            return;
+          }
           const id = btn.getAttribute('data-cancel');
-          const res = await apiFetch('/api/appointments/' + id, { method: 'DELETE' });
-          if (res.ok) {
+          try {
+            await apiJson('/api/appointments/' + id, {
+              method: 'DELETE',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ reason: reason.trim() }),
+            });
             loadAppointments();
-            if (availPanel.open) loadSlotGrid();
-          } else {
-            alert('Failed to cancel');
+            if (availPanel.open) loadAvailability();
+          } catch (err) {
+            alert('Failed to cancel: ' + (err.message || 'unknown error'));
           }
         });
       });
@@ -648,93 +761,142 @@
   }
 
   /* ===================== AVAILABILITY TAB ====================== */
-  const availDate    = document.getElementById('availDate');
-  const availRefresh = document.getElementById('availRefresh');
-  const slotGrid     = document.getElementById('slotGrid');
-  const availMsg     = document.getElementById('availMsg');
-  const addTimeDate  = document.getElementById('addTimeDate');
-  const addTimeTime  = document.getElementById('addTimeTime');
-  const addTimeBtn   = document.getElementById('addTimeBtn');
+  const availWeekView  = document.getElementById('availWeekView');
+  const availWeekLabel = document.getElementById('availWeekLabel');
+  const availWeekPrev  = document.getElementById('availWeekPrev');
+  const availWeekNext  = document.getElementById('availWeekNext');
+  const availWeekToday = document.getElementById('availWeekToday');
+  const availRefresh   = document.getElementById('availRefresh');
+  const availMsg       = document.getElementById('availMsg');
+  const addTimeDate    = document.getElementById('addTimeDate');
+  const addTimeTime    = document.getElementById('addTimeTime');
+  const addTimeBtn     = document.getElementById('addTimeBtn');
 
-  availDate.value = todayISO();
+  let availWeekMonday = initialWeekMonday();
   addTimeDate.value = todayISO();
-  availRefresh.addEventListener('click', loadSlotGrid);
-  availDate.addEventListener('change', () => {
-    addTimeDate.value = availDate.value;
-    loadSlotGrid();
+
+  availWeekPrev.addEventListener('click', () => {
+    availWeekMonday = addDays(availWeekMonday, -7);
+    loadAvailability();
   });
+  availWeekNext.addEventListener('click', () => {
+    availWeekMonday = addDays(availWeekMonday, 7);
+    loadAvailability();
+  });
+  availWeekToday.addEventListener('click', () => {
+    availWeekMonday = getMondayOf(todayISO());
+    loadAvailability();
+  });
+  availRefresh.addEventListener('click', loadAvailability);
+  // Lazy-load the week the first time the panel is expanded, and also
+  // refresh on every subsequent open so day-of data is always current.
   availPanel.addEventListener('toggle', () => {
-    if (availPanel.open) loadSlotGrid();
+    if (availPanel.open) loadAvailability();
   });
   addTimeBtn.addEventListener('click', addCustomTime);
 
-  async function loadSlotGrid() {
-    const date = availDate.value;
-    if (!date) return;
-    slotGrid.innerHTML = '<div class="empty" style="grid-column: 1/-1;">Loading…</div>';
+  async function loadAvailability() {
+    availWeekLabel.textContent = fmtWeekLabel(availWeekMonday);
+    availWeekView.innerHTML = '<div class="empty">Loading…</div>';
     clearMsg();
 
-    let slots = [];
-    let blocks = [];
-    let appointmentsByTime = {};
-    let customByTime = {};
+    const days = daysInView(availWeekMonday);
+    if (days.length === 0) {
+      availWeekView.innerHTML = '<div class="empty">No workdays in this week view.</div>';
+      return;
+    }
+    const from = days[0];
+    const to   = days[days.length - 1];
+
+    // One batch of fetches for the whole week:
+    //   - /api/slots is per-day (no range support) → N parallel
+    //   - /api/appointments, /api/blocks, /api/custom-slots support ranges
+    let bundle;
     try {
-      const [slotsRes, blocksRes, apptRes, customRes] = await Promise.all([
-        apiFetch('/api/slots?date=' + encodeURIComponent(date)),
-        apiFetch('/api/blocks?date=' + encodeURIComponent(date)),
-        apiFetch('/api/appointments?from=' + date + '&to=' + date),
-        apiFetch('/api/custom-slots?date=' + encodeURIComponent(date)),
+      const slotPromises = days.map((d) =>
+        apiFetch('/api/slots?date=' + encodeURIComponent(d)).then((r) => r.json())
+      );
+      const [apptRes, blocksRes, customRes, ...slotResps] = await Promise.all([
+        apiFetch(`/api/appointments?from=${from}&to=${to}`),
+        apiFetch(`/api/blocks`),
+        apiFetch(`/api/custom-slots?from=${from}&to=${to}`),
+        ...slotPromises,
       ]);
-      slots  = (await slotsRes.json()).slots || [];
-      blocks = (await blocksRes.json()).blocks || [];
-      const appts = (await apptRes.json()).appointments || [];
-      appointmentsByTime = Object.fromEntries(appts.map(a => [a.time, a]));
-      const customs = (await customRes.json()).slots || [];
-      customByTime = Object.fromEntries(customs.map((c) => [c.time, c]));
+      bundle = {
+        appts:   (await apptRes.json()).appointments || [],
+        blocks:  (await blocksRes.json()).blocks || [],
+        customs: (await customRes.json()).slots || [],
+        slotsByDay: Object.fromEntries(
+          days.map((d, i) => [d, (slotResps[i] || {}).slots || []])
+        ),
+      };
     } catch (e) {
-      slotGrid.innerHTML = '<div class="empty" style="grid-column: 1/-1;">Couldn\'t load slot data.</div>';
+      availWeekView.innerHTML = '<div class="empty">Couldn\'t load slot data.</div>';
       return;
     }
 
-    if (slots.length === 0) {
-      slotGrid.innerHTML =
-        '<div class="empty" style="grid-column: 1/-1;">No slots on this date. ' +
-        'Use <strong>Add times</strong> below to open one.</div>';
-      return;
-    }
+    renderAvailability(days, bundle);
+  }
 
-    const blockByTime = Object.fromEntries(blocks.map(b => [b.time, b]));
-    slotGrid.innerHTML = slots.map(s => {
-      const appt = appointmentsByTime[s.time];
-      const isCustom = !!(s.custom || customByTime[s.time]);
-      let sub = 'Available';
-      if (s.status === 'booked' && appt) sub = esc(appt.name);
-      else if (s.status === 'blocked') sub = 'Blocked';
-      else if (isCustom) sub = 'Custom';
-      const customId = customByTime[s.time] ? customByTime[s.time].id : '';
-      const removeBtn = (isCustom && s.status !== 'booked')
-        ? `<button class="remove" data-remove-custom="${customId}" title="Remove custom slot">×</button>`
-        : '';
-      return `
-        <div class="slot ${s.status}${isCustom ? ' custom-slot' : ''}"
-             data-time="${esc(s.time)}" data-status="${esc(s.status)}"
-             data-block-id="${blockByTime[s.time] ? blockByTime[s.time].id : ''}">
-          ${removeBtn}
-          ${esc(s.time)}
-          <span class="sub">${sub}</span>
-        </div>
-      `;
+  function renderAvailability(days, data) {
+    const { appts, blocks, customs, slotsByDay } = data;
+    const apptsByDT = {};   // "YYYY-MM-DD HH:MM" → appt
+    const blocksByDT = {};  // "YYYY-MM-DD HH:MM" → {id,...}
+    const customsByDT = {}; // "YYYY-MM-DD HH:MM" → {id,...}
+    for (const a of appts)   apptsByDT  [`${a.date} ${a.time}`] = a;
+    for (const b of blocks)  blocksByDT [`${b.date} ${b.time}`] = b;
+    for (const c of customs) customsByDT[`${c.date} ${c.time}`] = c;
+
+    const todayYmd = todayISO();
+    const sections = days.map((date) => {
+      const slots = slotsByDay[date] || [];
+      const headerCls = date === todayYmd ? ' today' : '';
+      const header = `<h3 class="day-header${headerCls}">${esc(fmtDayHeader(date))}</h3>`;
+      if (slots.length === 0) {
+        return `<div class="day-section">${header}` +
+          `<div class="empty-day">No slots on this date. Use <strong>Add times</strong> below to open one.</div>` +
+          `</div>`;
+      }
+      const grid = slots.map((s) => {
+        const key = `${date} ${s.time}`;
+        const appt = apptsByDT[key];
+        const customRow = customsByDT[key];
+        const isCustom = !!(s.custom || customRow);
+        let sub = 'Available';
+        if (s.status === 'booked' && appt) sub = esc(appt.name);
+        else if (s.status === 'blocked') sub = 'Blocked';
+        else if (isCustom) sub = 'Custom';
+        const customId = customRow ? customRow.id : '';
+        const removeBtn = (isCustom && s.status !== 'booked')
+          ? `<button class="remove" data-remove-custom="${customId}" title="Remove custom slot">×</button>`
+          : '';
+        const blockId = blocksByDT[key] ? blocksByDT[key].id : '';
+        return `
+          <div class="slot ${s.status}${isCustom ? ' custom-slot' : ''}"
+               data-time="${esc(s.time)}"
+               data-date="${esc(date)}"
+               data-status="${esc(s.status)}"
+               data-block-id="${blockId}">
+            ${removeBtn}
+            ${esc(s.time)}
+            <span class="sub">${sub}</span>
+          </div>
+        `;
+      }).join('');
+      return `<div class="day-section">${header}<div class="slot-grid">${grid}</div></div>`;
     }).join('');
 
-    slotGrid.querySelectorAll('.slot').forEach((el) => {
+    availWeekView.innerHTML = sections;
+
+    availWeekView.querySelectorAll('.slot').forEach((el) => {
       el.addEventListener('click', (ev) => {
         // The "×" remove-custom button lives inside the slot; let it
         // handle its own click without also toggling a block.
         if (ev.target.closest('[data-remove-custom]')) return;
-        handleSlotClick(el, date);
+        handleSlotClick(el);
       });
     });
-    slotGrid.querySelectorAll('[data-remove-custom]').forEach((btn) => {
+    availWeekView.querySelectorAll('[data-remove-custom]').forEach((btn) => {
       btn.addEventListener('click', async (ev) => {
         ev.stopPropagation();
         const id = btn.dataset.removeCustom;
@@ -743,7 +905,7 @@
         try {
           await apiJson('/api/custom-slots/' + id, { method: 'DELETE' });
           showMsg('Custom time removed.', 'ok');
-          loadSlotGrid();
+          loadAvailability();
         } catch (err) {
           showMsg(err.message || 'Failed to remove.', 'err');
         }
@@ -751,11 +913,12 @@
     });
   }
 
-  async function handleSlotClick(el, date) {
+  async function handleSlotClick(el) {
     const status = el.dataset.status;
     const time   = el.dataset.time;
+    const date   = el.dataset.date;
     if (status === 'booked') {
-      showMsg(`${time} is booked — cancel the appointment to free it up.`, 'err');
+      showMsg(`${time} on ${date} is booked — cancel the appointment to free it up.`, 'err');
       return;
     }
     if (status === 'available') {
@@ -763,7 +926,7 @@
     } else if (status === 'blocked') {
       await unblockSlot(date, time);
     }
-    await loadSlotGrid();
+    await loadAvailability();
   }
 
   async function blockSlot(date, time) {
@@ -804,14 +967,10 @@
         body: JSON.stringify({ date, time: hhmm }),
       });
       showMsg(`Added custom time ${hhmm} on ${date}.`, 'ok');
-      // If the date we just added matches the currently-viewed availability
-      // date, refresh the grid so the new slot shows up.
-      if (availDate.value === date) loadSlotGrid();
-      else {
-        // Otherwise, point the grid at the date the admin just modified.
-        availDate.value = date;
-        loadSlotGrid();
-      }
+      // Jump the week view to the week that contains the date we just
+      // modified so the new slot is visible.
+      availWeekMonday = getMondayOf(date);
+      loadAvailability();
     } catch (err) {
       showMsg(err.message || 'Failed to add time.', 'err');
     }
@@ -1009,7 +1168,6 @@
   /* ---------- initial load ---------- */
   (async function init() {
     await loadMe();
-    renderChips();
     loadAppointments();
   })();
 </script>
