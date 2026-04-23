@@ -290,6 +290,69 @@
 
     /* Hidden helper */
     [hidden] { display: none !important; }
+
+    /* Change-password modal */
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(20, 27, 45, 0.45);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 50;
+      padding: 20px;
+    }
+    .modal-card {
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.18);
+      padding: 24px 24px 20px;
+      width: 100%;
+      max-width: 420px;
+    }
+    .modal-card h3 {
+      margin: 0 0 14px;
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--ink);
+    }
+    .modal-card label {
+      display: block;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--muted);
+      margin: 10px 0 4px;
+    }
+    .modal-card input[type="password"] {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      font-size: 14px;
+    }
+    .modal-card .actions {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+      margin-top: 18px;
+    }
+    .modal-card .modal-msg {
+      margin-top: 12px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      font-size: 13px;
+      display: none;
+    }
+    .modal-card .modal-msg.err {
+      background: #fdecea;
+      color: var(--err);
+      display: block;
+    }
+    .modal-card .modal-msg.ok {
+      background: #e8f5ef;
+      color: var(--ok);
+      display: block;
+    }
   </style>
 </head>
 <body>
@@ -298,11 +361,38 @@
       <h1>Scheduler</h1>
       <div class="row">
         <span class="whoami" id="whoami"></span>
+        <button type="button" id="changePwBtn" class="ghost" hidden>Change password</button>
         <form class="logout" method="post" action="/logout">
           <button type="submit" class="ghost">Log out</button>
         </form>
       </div>
     </header>
+
+    <!-- Change-password modal (populated only on demand). Shown for all
+         non-root users. Required current password guards against session
+         theft escalating to account takeover. -->
+    <div id="pwModal" class="modal-overlay" hidden>
+      <div class="modal-card">
+        <h3>Change password</h3>
+        <form id="pwForm">
+          <label for="pwCurrent">Current password</label>
+          <input type="password" id="pwCurrent" autocomplete="current-password" required />
+
+          <label for="pwNew">New password (at least 6 characters)</label>
+          <input type="password" id="pwNew" autocomplete="new-password" required minlength="6" />
+
+          <label for="pwConfirm">Confirm new password</label>
+          <input type="password" id="pwConfirm" autocomplete="new-password" required minlength="6" />
+
+          <div class="modal-msg" id="pwMsg"></div>
+
+          <div class="actions">
+            <button type="button" class="ghost" id="pwCancel">Cancel</button>
+            <button type="submit" class="primary" id="pwSubmit">Change password</button>
+          </div>
+        </form>
+      </div>
+    </div>
 
     <!-- ======================= APPOINTMENTS ======================= -->
     <details class="panel" id="apptPanel" open>
@@ -482,16 +572,17 @@
   // The /admin page is served to any logged-in user. We fetch /api/me to
   // find out whether the current user is an admin or viewer, then show
   // or hide the Availability / Users panels accordingly.
-  let currentUser = { username: '', role: 'viewer', full_name: '', zendesk_subdomain: '' };
+  let currentUser = { username: '', role: 'viewer', full_name: '', zendesk_subdomain: '', is_root: false };
   const whoami = document.getElementById('whoami');
   const availPanel = document.getElementById('availPanel');
   const usersPanel = document.getElementById('usersPanel');
+  const changePwBtn = document.getElementById('changePwBtn');
 
   async function loadMe() {
     try {
       currentUser = await apiJson('/api/me');
     } catch (_) {
-      currentUser = { username: '', role: 'viewer', full_name: '', zendesk_subdomain: '' };
+      currentUser = { username: '', role: 'viewer', full_name: '', zendesk_subdomain: '', is_root: false };
     }
     // Display: "Alex Smith (alex)  [admin]" if a full name is set,
     // otherwise just "alex  [admin]".
@@ -509,6 +600,12 @@
     // full name we can match against the scheduler's assigned_rep.
     if (currentUser.full_name) {
       mineToggle.hidden = false;
+    }
+    // Self-service password change is available to any real user account.
+    // The built-in ADMIN_PASSWORD root login can't use it — that password
+    // lives in Render's environment, not in the DB.
+    if (!currentUser.is_root) {
+      changePwBtn.hidden = false;
     }
   }
 
@@ -1164,6 +1261,74 @@
       userMsg.textContent = '';
     }, 3500);
   }
+
+  /* ======================= CHANGE PASSWORD ===================== */
+  const pwModal   = document.getElementById('pwModal');
+  const pwForm    = document.getElementById('pwForm');
+  const pwCurrent = document.getElementById('pwCurrent');
+  const pwNew     = document.getElementById('pwNew');
+  const pwConfirm = document.getElementById('pwConfirm');
+  const pwMsg     = document.getElementById('pwMsg');
+  const pwCancel  = document.getElementById('pwCancel');
+  const pwSubmit  = document.getElementById('pwSubmit');
+
+  function openPwModal() {
+    pwCurrent.value = '';
+    pwNew.value = '';
+    pwConfirm.value = '';
+    setPwMsg('', '');
+    pwModal.hidden = false;
+    setTimeout(() => pwCurrent.focus(), 50);
+  }
+  function closePwModal() {
+    pwModal.hidden = true;
+  }
+  function setPwMsg(text, kind) {
+    pwMsg.textContent = text || '';
+    pwMsg.className = 'modal-msg' + (kind ? ' ' + kind : '');
+  }
+
+  changePwBtn.addEventListener('click', openPwModal);
+  pwCancel.addEventListener('click', closePwModal);
+  // Click on the dimmed overlay (but not the card) = cancel.
+  pwModal.addEventListener('click', (e) => {
+    if (e.target === pwModal) closePwModal();
+  });
+  // ESC closes the modal.
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !pwModal.hidden) closePwModal();
+  });
+
+  pwForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    setPwMsg('', '');
+    const current = pwCurrent.value;
+    const next = pwNew.value;
+    const confirm = pwConfirm.value;
+    if (next.length < 6) {
+      return setPwMsg('New password must be at least 6 characters.', 'err');
+    }
+    if (next !== confirm) {
+      return setPwMsg('New passwords don\'t match.', 'err');
+    }
+    if (next === current) {
+      return setPwMsg('New password must be different from the current one.', 'err');
+    }
+    pwSubmit.disabled = true;
+    try {
+      await apiJson('/api/me/password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ current_password: current, new_password: next }),
+      });
+      setPwMsg('Password updated. Other signed-in devices have been logged out.', 'ok');
+      setTimeout(closePwModal, 1500);
+    } catch (err) {
+      setPwMsg(err.message || 'Failed to change password.', 'err');
+    } finally {
+      pwSubmit.disabled = false;
+    }
+  });
 
   /* ---------- initial load ---------- */
   (async function init() {

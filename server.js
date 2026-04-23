@@ -1178,6 +1178,17 @@ const stmtDeleteSession = db.prepare(`DELETE FROM sessions WHERE token = ?`);
 const stmtDeleteSessionsForUser = db.prepare(
   `DELETE FROM sessions WHERE user_id = ?`
 );
+// Invalidate every session for a user EXCEPT the caller's current one. Used
+// by the self-service password change so other devices get logged out but
+// the admin doing the change stays signed in.
+const stmtDeleteOtherSessionsForUser = db.prepare(
+  `DELETE FROM sessions WHERE user_id = ? AND token != ?`
+);
+// Needed by POST /api/me/password to look up the current user with their
+// stored password hash (the public finder omits that column).
+const stmtFindUserByIdWithHash = db.prepare(
+  `SELECT id, username, password_hash, role FROM users WHERE id = ?`
+);
 
 // User-related prepared statements
 const stmtInsertUser = db.prepare(
@@ -1424,7 +1435,59 @@ app.get('/api/me', requireUser, (req, res) => {
     role: s.role,
     full_name: fullName,
     zendesk_subdomain: ZENDESK_SUBDOMAIN || '',
+    // Built-in ADMIN_PASSWORD login has no user row — flagged here so the
+    // UI can hide self-service password-change (env-var password is
+    // managed in Render, not in this app's DB).
+    is_root: !s.user_id,
   });
+});
+
+// POST /api/me/password — a logged-in user changes their own password.
+// Requires them to re-authenticate with their current password (defends
+// against a stolen session being used to lock out the real user). The
+// built-in ADMIN_PASSWORD root login can't use this — its password lives
+// in the environment, not in the database.
+app.post('/api/me/password', requireUser, (req, res) => {
+  const s = getSession(req);
+  if (!s.user_id) {
+    return res.status(400).json({
+      error:
+        'The built-in admin account\'s password is the ADMIN_PASSWORD env var — change it in Render.',
+    });
+  }
+  const body = req.body || {};
+  const current = String(body.current_password || '');
+  const next = String(body.new_password || '');
+  if (!current) {
+    return res.status(400).json({ error: 'current password is required' });
+  }
+  if (!next || next.length < 6) {
+    return res
+      .status(400)
+      .json({ error: 'new password must be at least 6 characters' });
+  }
+  if (next === current) {
+    return res
+      .status(400)
+      .json({ error: 'new password must be different from the current one' });
+  }
+  const user = stmtFindUserByIdWithHash.get(s.user_id);
+  if (!user) {
+    // Session refers to a user that was deleted out from under us — sign
+    // them out so they're forced to log in again.
+    stmtDeleteSession.run(s.token);
+    return res.status(401).json({ error: 'account not found' });
+  }
+  if (!verifyPassword(current, user.password_hash)) {
+    return res.status(401).json({ error: 'current password is incorrect' });
+  }
+  stmtUpdateUserPassword.run(hashPassword(next), s.user_id);
+  // Log out other active sessions for this user (e.g. other devices), but
+  // keep the session that made this request so the admin doesn't get
+  // bounced to /login immediately after changing their password.
+  stmtDeleteOtherSessionsForUser.run(s.user_id, s.token);
+  console.log(`[auth] user ${user.username} changed their own password`);
+  res.json({ ok: true });
 });
 
 // ---- Public API ----------------------------------------------------------
