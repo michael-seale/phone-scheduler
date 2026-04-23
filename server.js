@@ -755,6 +755,13 @@ async function sendCustomerConfirmation(appt) {
   const rescheduleUrl = haveLinks ? `${APP_BASE_URL}/?reschedule=${token}`   : '';
 
   const whenLine = formatWhenForCustomer(appt.date, appt.time, appt.timezone);
+  // If a Zendesk ticket was created for this appointment, surface the
+  // number so the customer can reference it if they reach out. Silently
+  // omitted when there's no ticket (Zendesk disabled, legacy row, or a
+  // ticket-create failure that was logged on the server side).
+  const ticketRef = appt.zendesk_ticket_id
+    ? `Ticket Reference Number: ${appt.zendesk_ticket_id}`
+    : null;
   const lines = [
     `Hi ${appt.name.split(/\s+/)[0]},`,
     ``,
@@ -764,6 +771,7 @@ async function sendCustomerConfirmation(appt) {
     `Phone: ${formatPhone(appt.phone) || '(we\'ll use the number you provide during the call)'}`,
     `Software Version: ${appt.software_version || '(not provided)'}`,
     `Notes you shared: ${appt.notes || '(none)'}`,
+    ...(ticketRef ? [``, ticketRef] : []),
     ``,
     `We'll reach out at the time above.`,
   ];
@@ -802,6 +810,7 @@ async function sendCustomerConfirmation(appt) {
         <strong>Phone:</strong> ${esc(formatPhone(appt.phone) || "(we'll use the number you provide during the call)")}<br>
         <strong>Software Version:</strong> ${esc(appt.software_version || '(not provided)')}<br>
         <strong>Notes you shared:</strong> ${esc(appt.notes || '(none)')}
+        ${ticketRef ? `<br><strong>Ticket Reference Number:</strong> ${esc(appt.zendesk_ticket_id)}` : ''}
       </p>
       <p>We'll reach out at the time above.</p>
       ${
@@ -1632,10 +1641,15 @@ app.post('/api/appointments', (req, res) => {
       } catch (e) {
         console.error('[zendesk] unexpected error (create):', e);
       }
+      // Send the confirmation email AFTER Zendesk ticket creation so the
+      // email can include the ticket reference number. Still inside the
+      // same async block so the HTTP response isn't blocked on SMTP.
+      try {
+        await sendCustomerConfirmation(appt);
+      } catch (e) {
+        console.error('[email] unexpected error (confirmation):', e);
+      }
     })();
-    sendCustomerConfirmation(appt).catch((e) =>
-      console.error('[email] unexpected error (confirmation):', e)
-    );
     res.status(201).json(appt);
   } catch (err) {
     // node:sqlite raises errcode 2067 (SQLITE_CONSTRAINT_UNIQUE) when our
