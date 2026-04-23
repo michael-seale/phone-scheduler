@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cancel Appointment — Renewed Vision Support</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@600;700;800&display=swap"
+    rel="stylesheet"
+  >
+
+  <style>
+    :root {
+      --bg: #f6f7fb;
+      --card: #ffffff;
+      --ink: #1a2236;
+      --muted: #6b7280;
+      --accent: #3b5bdb;
+      --err: #c0392b;
+      --border: #e5e7eb;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+      min-height: 100vh;
+      padding: 40px 16px;
+    }
+    .wrap { max-width: 560px; margin: 0 auto; }
+    h1 {
+      margin: 0 0 18px;
+      font-size: 28px;
+      font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+      font-weight: 800;
+      letter-spacing: -0.01em;
+      text-align: center;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 28px 24px;
+      box-shadow: 0 1px 2px rgba(0,0,0,.03);
+    }
+    .headline {
+      margin: 0 0 8px;
+      font-size: 22px;
+      font-weight: 700;
+      text-align: center;
+    }
+    .sub { margin: 0 0 8px; color: var(--muted); text-align: center; }
+    .appt-info {
+      margin: 16px 0 22px;
+      padding: 10px 14px;
+      background: #f6f7fb;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      text-align: center;
+      color: var(--ink);
+      font-size: 14px;
+    }
+    .appt-info strong { color: var(--ink); }
+    label {
+      display: block;
+      font-size: 13px;
+      font-weight: 600;
+      margin: 0 0 6px;
+    }
+    textarea {
+      width: 100%;
+      min-height: 120px;
+      padding: 12px 14px;
+      font-family: inherit;
+      font-size: 15px;
+      line-height: 1.4;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--ink);
+      resize: vertical;
+    }
+    textarea:focus { border-color: var(--accent); outline: none; }
+
+    .buttons {
+      display: flex;
+      gap: 10px;
+      justify-content: flex-end;
+      margin-top: 18px;
+      flex-wrap: wrap;
+    }
+    .btn {
+      display: inline-block;
+      padding: 12px 22px;
+      font-size: 15px;
+      font-weight: 600;
+      font-family: inherit;
+      border-radius: 8px;
+      border: 1px solid transparent;
+      cursor: pointer;
+      text-decoration: none;
+    }
+    .btn-primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .btn-primary:hover { filter: brightness(0.95); }
+    .btn-primary:disabled { opacity: 0.6; cursor: not-allowed; }
+    .btn-ghost { background: #fff; color: var(--accent); border-color: var(--accent); }
+    .btn-ghost:hover { background: #eef1fd; }
+
+    .warn {
+      margin-top: 14px;
+      padding: 10px 14px;
+      background: #fdecea;
+      color: var(--err);
+      border-radius: 8px;
+      font-size: 14px;
+      display: none;
+    }
+    .warn.show { display: block; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Renewed Vision Support</h1>
+    <div class="card">
+      <p class="headline">Reason for Cancellation</p>
+      <p class="sub">
+        Before we cancel, please let us know why — it helps us do better.
+      </p>
+
+      <div class="appt-info" id="apptInfo" style="display:none;">
+        <!-- Populated by JS once we've fetched the appointment. -->
+      </div>
+
+      <form id="cancelForm" method="post" action="/cancel">
+        <input type="hidden" name="token" id="token" />
+        <label for="reason">Your reason <span style="color: var(--err);">*</span></label>
+        <textarea
+          id="reason"
+          name="reason"
+          required
+          minlength="1"
+          maxlength="2000"
+          placeholder="Tell us what changed, or why you no longer need this appointment…"
+        ></textarea>
+        <div class="warn" id="warnNoReason">Please enter a reason before submitting.</div>
+        <div class="buttons">
+          <a href="https://support.renewedvision.com" class="btn btn-ghost">Cancel</a>
+          <button type="submit" class="btn btn-primary" id="submitBtn">Submit</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script>
+    // Pull the per-appointment token out of the URL. Without it, we can't
+    // cancel anything — bounce the user to the "missing" state.
+    const params = new URLSearchParams(location.search);
+    const token = params.get('token');
+    if (!token) {
+      location.replace('/canceled.html?status=missing');
+    } else {
+      document.getElementById('token').value = token;
+    }
+
+    // Friendly "you're cancelling your appointment on ..." strip.
+    // If the token is invalid (already canceled), redirect straight to the
+    // "already canceled" confirmation so the user isn't staring at a form
+    // that'll fail on submit.
+    if (token) {
+      fetch('/api/appointment-by-token?token=' + encodeURIComponent(token))
+        .then((r) => {
+          if (!r.ok) throw new Error('not found');
+          return r.json();
+        })
+        .then((a) => {
+          const info = document.getElementById('apptInfo');
+          info.innerHTML =
+            'You are cancelling your appointment on <strong>' +
+            escape(a.date) + '</strong> at <strong>' + escape(a.time) +
+            '</strong>.';
+          info.style.display = '';
+        })
+        .catch(() => {
+          location.replace('/canceled.html?status=already');
+        });
+    }
+
+    function escape(s) {
+      return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
+        '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+      }[c]));
+    }
+
+    // Extra guard on submit: trim and require non-empty. HTML5 `required`
+    // catches it too, but this gives us a nicer inline message.
+    const form = document.getElementById('cancelForm');
+    const warnNoReason = document.getElementById('warnNoReason');
+    const reasonEl = document.getElementById('reason');
+    form.addEventListener('submit', (e) => {
+      if (!reasonEl.value.trim()) {
+        e.preventDefault();
+        warnNoReason.classList.add('show');
+        reasonEl.focus();
+      }
+    });
+    reasonEl.addEventListener('input', () => {
+      if (reasonEl.value.trim()) warnNoReason.classList.remove('show');
+    });
+
+    // Show a light "missing reason" banner if the server bounced us back.
+    if (params.get('missingReason') === '1') {
+      warnNoReason.classList.add('show');
+    }
+  </script>
+</body>
+</html>

@@ -250,13 +250,13 @@ async function createZendeskTicket(appt) {
 
 /**
  * Append an internal comment to an existing Zendesk ticket, optionally
- * transitioning it to solved (used on cancel). Silent no-op if the
- * integration is disabled or the ticket id is missing.
+ * transitioning it to a specific status (e.g. 'solved', 'open'). Silent
+ * no-op if the integration is disabled or the ticket id is missing.
  */
-async function appendZendeskComment(ticketId, body, { solved = false } = {}) {
+async function appendZendeskComment(ticketId, body, { status } = {}) {
   if (!zendeskEnabled || !ticketId) return;
   const ticket = { comment: { body, public: false } };
-  if (solved) ticket.status = 'solved';
+  if (status) ticket.status = status;
   try {
     const res = await fetch(zendeskUrl(`/tickets/${ticketId}.json`), {
       method: 'PUT',
@@ -275,7 +275,7 @@ async function appendZendeskComment(ticketId, body, { solved = false } = {}) {
     }
     console.log(
       `[zendesk] commented on ticket #${ticketId}` +
-        (solved ? ' (marked solved)' : '')
+        (status ? ` (status → ${status})` : '')
     );
   } catch (e) {
     console.error('[zendesk] ticket update threw:', e.message);
@@ -1546,25 +1546,65 @@ app.post('/api/appointments', (req, res) => {
 // static "canceled" page. Uses GET so it works from any email client with
 // no JavaScript. Browsers sometimes pre-fetch links, but doing so here is
 // harmless: the worst case is that the booking is canceled a moment early.
+// GET /cancel?token=... — render the "Reason for Cancellation" form. The
+// form itself is served as a static file and pulls the token out of the
+// URL client-side; here we just short-circuit if the token is missing or
+// already invalid so the customer gets a clear message instead of a form
+// that will immediately fail on submit.
+//
+// NOTE: this route intentionally does NOT delete anything — the delete
+// happens in POST /cancel after the customer supplies a reason. That also
+// neutralizes the old "some email clients prefetch links" problem, which
+// would previously cancel appointments without the user's consent.
 app.get('/cancel', (req, res) => {
   const token = String(req.query.token || '');
   if (!token) return res.redirect('/canceled.html?status=missing');
   const appt = stmtFindByToken.get(token);
   if (!appt) {
-    // Already canceled, or never existed. Show the same success page so we
-    // don't leak any info about which tokens are valid.
+    // Already canceled, or never existed. Show the "already canceled"
+    // success page so we don't leak which tokens are valid.
     return res.redirect('/canceled.html?status=already');
   }
+  res.sendFile(path.join(__dirname, 'public', 'cancel-form.html'));
+});
+
+// POST /cancel — actually cancels the appointment. Body must include:
+//   token  — the per-appointment secret from the email
+//   reason — non-empty string, what the customer typed in the form
+// Posts an internal Zendesk comment with the reason and sets the ticket
+// status to "open" so an agent knows to follow up (per product spec:
+// cancellation is a signal, not a closing action).
+app.post('/cancel', (req, res) => {
+  const body = req.body || {};
+  const token = String(body.token || '');
+  const reason = String(body.reason || '').trim();
+
+  if (!token) return res.redirect('/canceled.html?status=missing');
+  const appt = stmtFindByToken.get(token);
+  if (!appt) return res.redirect('/canceled.html?status=already');
+  if (!reason) {
+    // Shouldn't happen — the form requires it — but defend anyway. Send
+    // the user back to the form with the token preserved.
+    return res.redirect(
+      '/cancel?token=' + encodeURIComponent(token) + '&missingReason=1'
+    );
+  }
+
   stmtDeleteByToken.run(token);
-  console.log(`[cancel] appt #${appt.id} canceled via token`);
-  // Zendesk: drop a cancel comment + solve the ticket. Fire-and-forget.
+  console.log(
+    `[cancel] appt #${appt.id} canceled via token with reason: ${reason.slice(0, 200)}`
+  );
+
+  // Zendesk: add an internal comment with the reason and reopen the
+  // ticket (status = 'open') so an agent is prompted to follow up.
   if (appt.zendesk_ticket_id) {
     appendZendeskComment(
       appt.zendesk_ticket_id,
-      `Appointment canceled by the customer via the email link on ${new Date().toISOString()}.`,
-      { solved: true }
+      `This appointment has been cancelled for reason: ${reason}`,
+      { status: 'open' }
     ).catch((e) => console.error('[zendesk] cancel comment error:', e));
   }
+
   res.redirect('/canceled.html?status=ok');
 });
 
@@ -1731,7 +1771,7 @@ app.delete('/api/appointments/:id', requireAdmin, (req, res) => {
     appendZendeskComment(
       appt.zendesk_ticket_id,
       `Appointment canceled by ${who} from the admin page on ${new Date().toISOString()}.`,
-      { solved: true }
+      { status: 'solved' }
     ).catch((e) => console.error('[zendesk] admin cancel comment error:', e));
   }
   res.json({ ok: true });
