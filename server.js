@@ -76,6 +76,216 @@ if (SMTP_USER && SMTP_PASS) {
   });
 }
 
+// ---- Zendesk integration ------------------------------------------------
+// When an appointment is booked we POST a ticket to Zendesk instead of
+// emailing support@. The ticket's requester is the customer (Zendesk
+// auto-creates/matches by email). If the RenewedVision scheduler lookup
+// returns an on-phones rep, and that rep's name maps to a Zendesk agent
+// email via ZENDESK_AGENT_MAP, the ticket is assigned to that agent.
+//
+// Env vars:
+//   ZENDESK_SUBDOMAIN   — e.g. "renewedvision"  → https://renewedvision.zendesk.com
+//   ZENDESK_EMAIL       — API user email (must be a Zendesk admin/agent)
+//   ZENDESK_TOKEN       — API token from Admin Center → Apps & integrations → APIs
+//   ZENDESK_AGENT_MAP   — comma-separated "Name=email" pairs. The "Name"
+//                         is the name returned by the scheduler (e.g.
+//                         "Riley Harmon"); the email is that agent's
+//                         Zendesk login address.
+//                         Example:
+//                           "Riley Harmon=riley@rv.com,Michael Seale=michael@rv.com"
+//
+// If any of the first three are unset, the integration is disabled and we
+// log a one-line notice at startup (bookings still work, they just won't
+// create tickets).
+const ZENDESK_SUBDOMAIN = (process.env.ZENDESK_SUBDOMAIN || '').trim();
+const ZENDESK_EMAIL     = (process.env.ZENDESK_EMAIL || '').trim();
+const ZENDESK_TOKEN     = (process.env.ZENDESK_TOKEN || '').trim();
+const ZENDESK_AGENT_MAP_RAW = process.env.ZENDESK_AGENT_MAP || '';
+// Override for Zendesk Sandbox (e.g. https://renewedvision1234.zendesk.com)
+// or local tests. Leave unset in production.
+const ZENDESK_BASE_URL  = (process.env.ZENDESK_BASE_URL || '').replace(/\/+$/, '');
+
+const zendeskEnabled = !!(ZENDESK_SUBDOMAIN && ZENDESK_EMAIL && ZENDESK_TOKEN);
+
+// Parse ZENDESK_AGENT_MAP into a Map<lowercasedName, email>.
+const zendeskAgentMap = new Map();
+for (const pair of ZENDESK_AGENT_MAP_RAW.split(',')) {
+  const [name, email] = pair.split('=').map((s) => (s || '').trim());
+  if (name && email) zendeskAgentMap.set(name.toLowerCase(), email);
+}
+
+// Cache email → Zendesk user_id so we don't hit /users/search.json on every
+// booking. Agents don't change emails often; in-memory is fine.
+const zendeskUserIdCache = new Map();
+
+function zendeskAuthHeader() {
+  return (
+    'Basic ' +
+    Buffer.from(`${ZENDESK_EMAIL}/token:${ZENDESK_TOKEN}`).toString('base64')
+  );
+}
+
+function zendeskUrl(pathName) {
+  const base =
+    ZENDESK_BASE_URL || `https://${ZENDESK_SUBDOMAIN}.zendesk.com`;
+  return `${base}/api/v2${pathName}`;
+}
+
+/** Look up a Zendesk user_id by email. Returns null if not found or on error. */
+async function findZendeskUserIdByEmail(email) {
+  if (!zendeskEnabled || !email) return null;
+  const key = email.toLowerCase();
+  if (zendeskUserIdCache.has(key)) return zendeskUserIdCache.get(key);
+  try {
+    const url = zendeskUrl(
+      `/users/search.json?query=${encodeURIComponent('email:' + email)}`
+    );
+    const res = await fetch(url, {
+      headers: { Authorization: zendeskAuthHeader() },
+    });
+    if (!res.ok) {
+      console.warn(`[zendesk] user search for ${email} failed: ${res.status}`);
+      zendeskUserIdCache.set(key, null);
+      return null;
+    }
+    const body = await res.json();
+    const user = (body.users || []).find(
+      (u) => (u.email || '').toLowerCase() === key
+    );
+    const id = user ? user.id : null;
+    if (!id) console.warn(`[zendesk] no Zendesk user found for ${email}`);
+    zendeskUserIdCache.set(key, id);
+    return id;
+  } catch (e) {
+    console.warn(`[zendesk] user search for ${email} threw: ${e.message}`);
+    return null;
+  }
+}
+
+/**
+ * Given a scheduler-returned name like "Riley Harmon", resolve to a Zendesk
+ * user_id through the ZENDESK_AGENT_MAP env var. Returns null if the name
+ * isn't in the map or the mapped email doesn't resolve to a Zendesk user.
+ */
+async function resolveZendeskAssignee(schedulerName) {
+  if (!schedulerName) return null;
+  const email = zendeskAgentMap.get(String(schedulerName).toLowerCase());
+  if (!email) {
+    console.log(
+      `[zendesk] no ZENDESK_AGENT_MAP entry for "${schedulerName}" — ticket will be unassigned`
+    );
+    return null;
+  }
+  return findZendeskUserIdByEmail(email);
+}
+
+/**
+ * Create a Zendesk ticket for an appointment. Returns the new ticket id,
+ * or null if the integration is disabled or the API call failed. Does NOT
+ * throw on failure — the booking still succeeds and is logged.
+ */
+async function createZendeskTicket(appt) {
+  if (!zendeskEnabled) return null;
+
+  // Who's scheduled on phones? Same lookup that used to fill in the email subject.
+  let assignedRep = null;
+  try {
+    assignedRep = await lookupAssignedRep(appt);
+  } catch (e) {
+    console.warn('[zendesk] rep lookup threw:', e.message);
+  }
+  const assignee_id = await resolveZendeskAssignee(assignedRep);
+
+  const whenLine = formatWhenForCustomer(appt.date, appt.time, appt.timezone);
+  const dateAndTime = `${formatShortDate(appt.date)} at ${formatShortTime(appt.time)}`;
+
+  // Body lines — compact, structured. First line pattern matches the old
+  // notification email so it reads naturally in the Zendesk ticket view.
+  const bodyLines = [
+    `New phone appointment booked.`,
+    ``,
+    `Name: ${appt.name}`,
+    `Email: ${appt.email}`,
+    `Phone: ${formatPhone(appt.phone) || '(not provided)'}`,
+    `Software Version: ${appt.software_version || '(not provided)'}`,
+    ``,
+    `When: ${whenLine}`,
+    `Assigned Rep (from scheduler): ${assignedRep || '(no one scheduled)'}`,
+    ``,
+    `Notes / Reason for Appointment:`,
+    appt.notes || '(none)',
+  ];
+
+  const ticket = {
+    subject: `Phone Appointment with ${appt.name} on ${dateAndTime}` +
+      (assignedRep ? ` with ${assignedRep}` : ''),
+    comment: { body: bodyLines.join('\n'), public: false },
+    requester: { name: appt.name, email: appt.email },
+    tags: ['phone-appointment', 'scheduler'],
+  };
+  if (assignee_id) ticket.assignee_id = assignee_id;
+
+  try {
+    const res = await fetch(zendeskUrl('/tickets.json'), {
+      method: 'POST',
+      headers: {
+        Authorization: zendeskAuthHeader(),
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ ticket }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      console.error(`[zendesk] ticket create failed: ${res.status} ${text}`);
+      return null;
+    }
+    const data = await res.json();
+    const id = data.ticket && data.ticket.id;
+    console.log(
+      `[zendesk] created ticket #${id} for appt #${appt.id}` +
+        (assignee_id ? ` assigned to user ${assignee_id}` : ' (unassigned)')
+    );
+    return id;
+  } catch (e) {
+    console.error('[zendesk] ticket create threw:', e.message);
+    return null;
+  }
+}
+
+/**
+ * Append an internal comment to an existing Zendesk ticket, optionally
+ * transitioning it to solved (used on cancel). Silent no-op if the
+ * integration is disabled or the ticket id is missing.
+ */
+async function appendZendeskComment(ticketId, body, { solved = false } = {}) {
+  if (!zendeskEnabled || !ticketId) return;
+  const ticket = { comment: { body, public: false } };
+  if (solved) ticket.status = 'solved';
+  try {
+    const res = await fetch(zendeskUrl(`/tickets/${ticketId}.json`), {
+      method: 'PUT',
+      headers: {
+        Authorization: zendeskAuthHeader(),
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ ticket }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      console.error(
+        `[zendesk] ticket update #${ticketId} failed: ${res.status} ${text}`
+      );
+      return;
+    }
+    console.log(
+      `[zendesk] commented on ticket #${ticketId}` +
+        (solved ? ' (marked solved)' : '')
+    );
+  } catch (e) {
+    console.error('[zendesk] ticket update threw:', e.message);
+  }
+}
+
 // ---- RenewedVision Scheduler integration --------------------------------
 // At booking time we look up who's on phones at the appointment and include
 // that person's name in the notification email.
@@ -619,51 +829,10 @@ async function sendCustomerConfirmation(appt) {
   }
 }
 
-async function sendBookingNotification(appt) {
-  if (!mailer) {
-    console.warn('[email] SMTP not configured — skipping notification for', appt.id);
-    return;
-  }
-  // Figure out who's on phones at that time. Non-blocking for booking —
-  // if this fails, we still send the email (without the rep name filled in).
-  const assignedRep = await lookupAssignedRep(appt);
-
-  const dateAndTime = `${formatShortDate(appt.date)} at ${formatShortTime(appt.time)}`;
-  const subject = `New Event: ${appt.name} on ${dateAndTime}` +
-    (assignedRep ? ` with ${assignedRep}` : '');
-
-  const lines = [
-    `There has been a new phone appointment booked!`,
-    ``,
-    `Name: ${appt.name}`,
-    ``,
-    `Email: ${appt.email}`,
-    ``,
-    `Phone: ${formatPhone(appt.phone) || '(not provided)'}`,
-    ``,
-    `Software Version: ${appt.software_version || '(not provided)'}`,
-    ``,
-    `Date and Time: ${dateAndTime}`,
-    ``,
-    `Assigned Rep: ${assignedRep || '(no one scheduled)'}`,
-    ``,
-    `Notes/Reason for Appointment: ${appt.notes || '(none)'}`,
-  ];
-  const text = lines.join('\n');
-
-  try {
-    await mailer.sendMail({
-      from: NOTIFY_FROM,
-      to: NOTIFY_TO,
-      replyTo: appt.email, // Hit "Reply" in support@ inbox → goes to customer
-      subject,
-      text,
-    });
-    console.log(`[email] sent notification for appt #${appt.id} → ${NOTIFY_TO}`);
-  } catch (err) {
-    console.error(`[email] send failed for appt #${appt.id}:`, err.message);
-  }
-}
+// (The support@ notification email was replaced by Zendesk ticket creation
+//  — see createZendeskTicket() above. The NOTIFY_TO / NOTIFY_FROM env vars
+//  are no longer used, but we leave them in render.yaml as deprecated for
+//  now so existing deployments don't break on the first redeploy.)
 
 // ---- Database setup ------------------------------------------------------
 const db = new DatabaseSync(DB_PATH);
@@ -759,6 +928,17 @@ db.exec(`
   }
 })();
 
+// ---- Migration: zendesk_ticket_id column ---------------------------------
+// Stored on each appointment so reschedule/cancel can update the SAME ticket
+// instead of spawning new ones. NULL for rows created before the integration
+// was wired up (or when Zendesk is disabled).
+(function migrateZendeskTicketId() {
+  const cols = db.prepare(`PRAGMA table_info(appointments)`).all();
+  if (!cols.some((c) => c.name === 'zendesk_ticket_id')) {
+    db.exec(`ALTER TABLE appointments ADD COLUMN zendesk_ticket_id INTEGER`);
+  }
+})();
+
 // ---- Migration: timezone column ------------------------------------------
 // The booking page sends the customer's IANA TZ (e.g. "America/Chicago") so
 // that the confirmation email renders times in their local zone. We store
@@ -814,6 +994,10 @@ const stmtListRange = db.prepare(`
   ORDER BY date ASC, time ASC
 `);
 const stmtDelete = db.prepare(`DELETE FROM appointments WHERE id = ?`);
+const stmtFindById = db.prepare(`SELECT * FROM appointments WHERE id = ?`);
+const stmtUpdateZendeskTicketId = db.prepare(
+  `UPDATE appointments SET zendesk_ticket_id = ? WHERE id = ?`
+);
 
 // Cancel / reschedule lookups by the per-appointment secret token.
 const stmtFindByToken = db.prepare(`
@@ -1256,12 +1440,23 @@ app.post('/api/appointments', (req, res) => {
       cancel_token,
       timezone,
     };
-    // Fire-and-forget: don't block the customer's response on SMTP.
-    // Two emails go out: the internal notification to support@, and a
-    // confirmation to the customer. Either failing doesn't affect the other.
-    sendBookingNotification(appt).catch((e) =>
-      console.error('[email] unexpected error (notification):', e)
-    );
+    // Fire-and-forget side effects: don't block the customer's response.
+    //   1. Create a Zendesk ticket (replaces the old support@ email).
+    //      When the ticket is created we save its id on the appointment row
+    //      so reschedule/cancel can update the SAME ticket later.
+    //   2. Send the customer their confirmation email.
+    // Either failing doesn't affect the other.
+    (async () => {
+      try {
+        const ticketId = await createZendeskTicket(appt);
+        if (ticketId) {
+          stmtUpdateZendeskTicketId.run(ticketId, appt.id);
+          appt.zendesk_ticket_id = ticketId;
+        }
+      } catch (e) {
+        console.error('[zendesk] unexpected error (create):', e);
+      }
+    })();
     sendCustomerConfirmation(appt).catch((e) =>
       console.error('[email] unexpected error (confirmation):', e)
     );
@@ -1307,6 +1502,14 @@ app.get('/cancel', (req, res) => {
   }
   stmtDeleteByToken.run(token);
   console.log(`[cancel] appt #${appt.id} canceled via token`);
+  // Zendesk: drop a cancel comment + solve the ticket. Fire-and-forget.
+  if (appt.zendesk_ticket_id) {
+    appendZendeskComment(
+      appt.zendesk_ticket_id,
+      `Appointment canceled by the customer via the email link on ${new Date().toISOString()}.`,
+      { solved: true }
+    ).catch((e) => console.error('[zendesk] cancel comment error:', e));
+  }
   res.redirect('/canceled.html?status=ok');
 });
 
@@ -1384,9 +1587,31 @@ app.post('/api/appointments/reschedule', (req, res) => {
     sendCustomerConfirmation(updated).catch((e) =>
       console.error('[email] unexpected error (reschedule confirmation):', e)
     );
-    sendBookingNotification(updated).catch((e) =>
-      console.error('[email] unexpected error (reschedule notification):', e)
-    );
+    // Zendesk: if a ticket was created for this appointment, drop an
+    // internal comment with the old → new times. If for some reason we
+    // don't have a ticket id (legacy row, Zendesk was disabled at booking
+    // time), create a fresh ticket so the team still has visibility.
+    (async () => {
+      try {
+        const oldWhen = formatWhenForCustomer(existing.date, existing.time, existing.timezone);
+        const newWhen = formatWhenForCustomer(updated.date, updated.time, updated.timezone);
+        if (updated.zendesk_ticket_id) {
+          await appendZendeskComment(
+            updated.zendesk_ticket_id,
+            `Appointment rescheduled by the customer.\n\n` +
+              `From: ${oldWhen}\n` +
+              `To:   ${newWhen}`
+          );
+        } else if (zendeskEnabled) {
+          const ticketId = await createZendeskTicket(updated);
+          if (ticketId) {
+            stmtUpdateZendeskTicketId.run(ticketId, updated.id);
+          }
+        }
+      } catch (e) {
+        console.error('[zendesk] unexpected error (reschedule):', e);
+      }
+    })();
     res.json(updated);
   } catch (err) {
     if (
@@ -1426,9 +1651,21 @@ app.delete('/api/appointments/:id', requireAdmin, (req, res) => {
   if (!Number.isFinite(id)) {
     return res.status(400).json({ error: 'invalid id' });
   }
+  // Grab the row BEFORE we delete it so we can drop a Zendesk cancel
+  // comment using the stored ticket id. (Once the row is gone, so is
+  // the id that links it to Zendesk.)
+  const appt = stmtFindById.get(id);
   const result = stmtDelete.run(id);
   if (result.changes === 0) {
     return res.status(404).json({ error: 'not found' });
+  }
+  if (appt && appt.zendesk_ticket_id) {
+    const who = (getSession(req) || {}).username || 'admin';
+    appendZendeskComment(
+      appt.zendesk_ticket_id,
+      `Appointment canceled by ${who} from the admin page on ${new Date().toISOString()}.`,
+      { solved: true }
+    ).catch((e) => console.error('[zendesk] admin cancel comment error:', e));
   }
   res.json({ ok: true });
 });
@@ -1754,5 +1991,15 @@ app.listen(PORT, () => {
     console.log(`  External API requires X-API-Key header.`);
   } else {
     console.log(`  External API is open (no API_KEY set).`);
+  }
+  if (zendeskEnabled) {
+    console.log(
+      `  Zendesk   : enabled — https://${ZENDESK_SUBDOMAIN}.zendesk.com` +
+        ` (agent map: ${zendeskAgentMap.size} entries)`
+    );
+  } else {
+    console.log(
+      `  Zendesk   : disabled (set ZENDESK_SUBDOMAIN/EMAIL/TOKEN to enable)`
+    );
   }
 });

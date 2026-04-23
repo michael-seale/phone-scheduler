@@ -89,6 +89,36 @@ services:
       - key: APP_BASE_URL
         sync: false
 
+      # ---- Zendesk (creates a ticket when a booking comes in) ----
+      # When all three of SUBDOMAIN / EMAIL / TOKEN are set, bookings create
+      # a Zendesk ticket INSTEAD of the support@ notification email above
+      # (the customer's confirmation email still goes out normally).
+      #
+      # ZENDESK_SUBDOMAIN is the subdomain part of your Zendesk URL:
+      #   https://<subdomain>.zendesk.com   →   just the <subdomain> here.
+      - key: ZENDESK_SUBDOMAIN
+        sync: false
+
+      # Zendesk email of the account the API will authenticate as. Must be
+      # an agent or admin in that Zendesk instance.
+      - key: ZENDESK_EMAIL
+        sync: false
+
+      # API token. Generate one at Admin Center → Apps & integrations →
+      # APIs → Zendesk API → Add API Token. Give it to Render via this
+      # variable — it should never live in git.
+      - key: ZENDESK_TOKEN
+        sync: false
+
+      # Map from scheduler-rep names (as returned by the RenewedVision
+      # scheduler) to Zendesk agent emails, comma-separated. Used to
+      # pre-assign each ticket to the on-phones rep.
+      # Example:
+      #   "Riley Harmon=riley@renewedvision.com,Michael Seale=michael@renewedvision.com"
+      # If a name isn't in the map, the ticket is created unassigned.
+      - key: ZENDESK_AGENT_MAP
+        sync: false
+
       # ---- RenewedVision Scheduler (who's-on-phones lookup) ----
       # The server reads `lib/scheduler-client.js` from the repo at startup
       # and runs it in a sandbox to get the RenewedVisionScheduler global.
