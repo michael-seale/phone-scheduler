@@ -744,86 +744,80 @@ async function sendCustomerConfirmation(appt) {
   const localShort = useLocal
     ? formatLocalTimeIn(slotDate, appt.timezone).replace(/\s?(AM|PM)/, (_, p) => p.toLowerCase())
     : formatShortTime(appt.time);
-  const subject = `Phone Appointment with Renewed Vision on ${shortDate} at ${localShort}`;
 
   // Cancel / reschedule links use the per-appointment token. If APP_BASE_URL
-  // isn't set we omit the section — we don't want to embed a bare path like
+  // isn't set we omit that section — we don't want to embed a bare path like
   // "/cancel?token=..." in an email.
   const token = appt.cancel_token || '';
   const haveLinks = APP_BASE_URL && token;
   const cancelUrl     = haveLinks ? `${APP_BASE_URL}/cancel?token=${token}` : '';
-  const rescheduleUrl = haveLinks ? `${APP_BASE_URL}/?reschedule=${token}`   : '';
+  const rescheduleUrl = haveLinks ? `${APP_BASE_URL}/?reschedule=${token}`  : '';
 
   const whenLine = formatWhenForCustomer(appt.date, appt.time, appt.timezone);
-  // If a Zendesk ticket was created for this appointment, surface the
-  // number so the customer can reference it if they reach out. Silently
-  // omitted when there's no ticket (Zendesk disabled, legacy row, or a
-  // ticket-create failure that was logged on the server side).
-  const ticketRef = appt.zendesk_ticket_id
-    ? `Ticket Reference Number: ${appt.zendesk_ticket_id}`
-    : null;
-  const lines = [
-    `Hi ${appt.name.split(/\s+/)[0]},`,
-    ``,
-    `Thanks for booking with Renewed Vision Support! Your appointment is confirmed.`,
-    ``,
-    `When: ${whenLine}`,
-    `Phone: ${formatPhone(appt.phone) || '(we\'ll use the number you provide during the call)'}`,
-    `Software Version: ${appt.software_version || '(not provided)'}`,
-    `Notes you shared: ${appt.notes || '(none)'}`,
-    ...(ticketRef ? [``, ticketRef] : []),
-    ``,
-    `We'll reach out at the time above.`,
-  ];
+  // Render the editable confirmation_email template. See renderTemplate()
+  // for placeholder rules — empty values strip their "Label: " line, so
+  // if there's no Zendesk ticket the Ticket Reference Number line vanishes.
+  const rendered = renderTemplate(getTemplate('confirmation_email'), {
+    first_name: (appt.name || '').split(/\s+/)[0] || 'there',
+    name: appt.name || '',
+    when: whenLine,
+    date: shortDate,
+    time: localShort,
+    phone:
+      formatPhone(appt.phone) ||
+      "(we'll use the number you provide during the call)",
+    software_version: appt.software_version || '(not provided)',
+    notes: appt.notes || '(none)',
+    ticket_id: appt.zendesk_ticket_id || '',
+  });
+
+  // Plain-text body: template + (optional) change-instructions block.
+  // The change-instructions block is NOT templated — it's a product
+  // feature with specific button UX that we don't want admins to
+  // accidentally break when editing the template.
+  const textLines = [rendered.body];
   if (haveLinks) {
-    lines.push(
-      ``,
-      `Need to make a change?`,
+    textLines.push(
+      '',
+      'Need to make a change?',
       `Reschedule: ${rescheduleUrl}`,
-      `Cancel:     ${cancelUrl}`,
+      `Cancel:     ${cancelUrl}`
     );
   } else {
-    lines.push(
-      ``,
-      `If you need to change or cancel this appointment, just reply to this`,
-      `email and our support team will help.`,
+    textLines.push(
+      '',
+      'If you need to change or cancel this appointment, just reply to this',
+      'email and our support team will help.'
     );
   }
-  lines.push(``, `— Renewed Vision Support`);
 
-  // HTML version: same content but with real buttons/links so Gmail doesn't
-  // render the plain URLs inline.
-  const esc = (s) =>
+  // HTML version: escape + wrap paragraphs (blank-line separated) in <p>,
+  // keep intra-paragraph newlines as <br>. The change-instructions block
+  // is appended as a styled button pair so it renders nicely in Gmail.
+  const escHtml = (s) =>
     String(s ?? '')
       .replace(/&/g, '&amp;').replace(/</g, '&lt;')
       .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   const btn = (href, label, color) =>
-    `<a href="${esc(href)}" style="display:inline-block;padding:10px 18px;` +
+    `<a href="${escHtml(href)}" style="display:inline-block;padding:10px 18px;` +
     `background:${color};color:#fff;text-decoration:none;border-radius:6px;` +
-    `font-weight:600;font-family:Arial,sans-serif;font-size:14px;">${esc(label)}</a>`;
+    `font-weight:600;font-family:Arial,sans-serif;font-size:14px;">${escHtml(label)}</a>`;
+  const bodyParagraphs = rendered.body
+    .split(/\n{2,}/)
+    .map((p) => `<p>${escHtml(p).replace(/\n/g, '<br>')}</p>`)
+    .join('\n');
+  const changeBlock = haveLinks
+    ? `<p style="margin:22px 0 6px 0;"><strong>Need to make a change?</strong></p>
+       <p style="margin:0;">
+         ${btn(rescheduleUrl, 'Reschedule', '#005f9e')}
+         &nbsp;&nbsp;
+         ${btn(cancelUrl, 'Cancel', '#b03a2e')}
+       </p>`
+    : `<p>If you need to change or cancel this appointment, just reply to this email and our support team will help.</p>`;
   const html = `
     <div style="font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#222;line-height:1.5;max-width:560px;">
-      <p>Hi ${esc(appt.name.split(/\s+/)[0])},</p>
-      <p>Thanks for booking with Renewed Vision Support! Your appointment is confirmed.</p>
-      <p>
-        <strong>When:</strong> ${esc(whenLine)}<br>
-        <strong>Phone:</strong> ${esc(formatPhone(appt.phone) || "(we'll use the number you provide during the call)")}<br>
-        <strong>Software Version:</strong> ${esc(appt.software_version || '(not provided)')}<br>
-        <strong>Notes you shared:</strong> ${esc(appt.notes || '(none)')}
-        ${ticketRef ? `<br><strong>Ticket Reference Number:</strong> ${esc(appt.zendesk_ticket_id)}` : ''}
-      </p>
-      <p>We'll reach out at the time above.</p>
-      ${
-        haveLinks
-          ? `<p style="margin:22px 0 6px 0;"><strong>Need to make a change?</strong></p>
-             <p style="margin:0;">
-               ${btn(rescheduleUrl, 'Reschedule', '#005f9e')}
-               &nbsp;&nbsp;
-               ${btn(cancelUrl, 'Cancel', '#b03a2e')}
-             </p>`
-          : `<p>If you need to change or cancel this appointment, just reply to this email and our support team will help.</p>`
-      }
-      <p style="color:#666;margin-top:22px;">— Renewed Vision Support</p>
+      ${bodyParagraphs}
+      ${changeBlock}
     </div>
   `;
 
@@ -832,8 +826,8 @@ async function sendCustomerConfirmation(appt) {
       from: NOTIFY_FROM,
       to: appt.email,
       replyTo: NOTIFY_TO, // replies go to support@
-      subject,
-      text: lines.join('\n'),
+      subject: rendered.subject,
+      text: textLines.join('\n'),
       html,
     });
     console.log(`[email] sent confirmation for appt #${appt.id} → ${appt.email}`);
@@ -850,18 +844,17 @@ async function sendCustomerConfirmation(appt) {
  */
 function buildCancellationBody(appt, reason) {
   const whenLine = formatWhenForCustomer(appt.date, appt.time, appt.timezone);
-  const firstName = String(appt.name || '').split(/\s+/)[0] || 'there';
-  return [
-    `Hi ${firstName},`,
-    ``,
-    `Your phone appointment on ${whenLine} has been canceled.`,
-    ``,
-    `Reason: ${String(reason || '').trim() || '(no reason given)'}`,
-    ``,
-    `If this was a mistake, just reply to this message and our support team will help.`,
-    ``,
-    `— Renewed Vision Support`,
-  ].join('\n');
+  const rendered = renderTemplate(getTemplate('cancellation_comment'), {
+    first_name: String(appt.name || '').split(/\s+/)[0] || 'there',
+    name: appt.name || '',
+    when: whenLine,
+    date: formatShortDate(appt.date),
+    time: formatShortTime(appt.time),
+    phone: formatPhone(appt.phone) || '',
+    reason: String(reason || '').trim() || '(no reason given)',
+    ticket_id: appt.zendesk_ticket_id || '',
+  });
+  return rendered.body;
 }
 
 /**
@@ -1022,6 +1015,17 @@ db.exec(`
     UNIQUE (date, time)
   );
   CREATE INDEX IF NOT EXISTS idx_custom_slots_date ON custom_slots(date);
+
+  -- Editable message templates. Powers the customer confirmation email
+  -- and the public Zendesk cancellation comment. Placeholders use
+  -- {snake_case} syntax (see renderTemplate below). Defaults are seeded
+  -- on startup from the DEFAULT_TEMPLATES constant.
+  CREATE TABLE IF NOT EXISTS templates (
+    name       TEXT PRIMARY KEY,
+    subject    TEXT,
+    body       TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
 `);
 
 // ---- Migration: cancel_token column --------------------------------------
@@ -1124,6 +1128,107 @@ db.exec(`
       WHERE username IS NULL OR role IS NULL`
   );
 })();
+
+// ---- Message templates ---------------------------------------------------
+//
+// Two customer-facing messages are editable via /api/templates and the
+// "Templates" panel on the admin page:
+//   confirmation_email    — emailed to the customer on booking & reschedule
+//   cancellation_comment  — posted as a PUBLIC Zendesk comment on cancel
+//                           (customer or admin); Zendesk auto-emails it
+//
+// Placeholders are rendered at send time — see renderTemplate(). The
+// defaults below match the pre-templating behavior exactly, so upgrading
+// a deployment is a no-op until an admin edits something.
+const DEFAULT_TEMPLATES = {
+  confirmation_email: {
+    subject: 'Phone Appointment with Renewed Vision on {date} at {time}',
+    body: [
+      'Hi {first_name},',
+      '',
+      'Thanks for booking with Renewed Vision Support! Your appointment is confirmed.',
+      '',
+      'When: {when}',
+      'Phone: {phone}',
+      'Software Version: {software_version}',
+      'Notes you shared: {notes}',
+      '',
+      'Ticket Reference Number: {ticket_id}',
+      '',
+      "We'll reach out at the time above.",
+      '',
+      '— Renewed Vision Support',
+    ].join('\n'),
+  },
+  cancellation_comment: {
+    subject: '',
+    body: [
+      'Hi {first_name},',
+      '',
+      'Your phone appointment on {when} has been canceled.',
+      '',
+      'Reason: {reason}',
+      '',
+      'If this was a mistake, just reply to this message and our support team will help.',
+      '',
+      '— Renewed Vision Support',
+    ].join('\n'),
+  },
+};
+
+// Seed defaults on first boot. INSERT OR IGNORE so existing rows aren't
+// overwritten when a new release of this server ships updated defaults —
+// admins that customized their templates keep their edits.
+(function seedTemplates() {
+  const ins = db.prepare(
+    `INSERT OR IGNORE INTO templates (name, subject, body) VALUES (?, ?, ?)`
+  );
+  for (const [name, t] of Object.entries(DEFAULT_TEMPLATES)) {
+    ins.run(name, t.subject || '', t.body);
+  }
+})();
+
+/**
+ * Load a template by name, falling back to the hard-coded default if the
+ * row isn't there (shouldn't happen after seeding, but belt-and-braces).
+ */
+function getTemplate(name) {
+  const row = db
+    .prepare('SELECT subject, body FROM templates WHERE name = ?')
+    .get(name);
+  if (row) return row;
+  return DEFAULT_TEMPLATES[name] || null;
+}
+
+/**
+ * Substitute {snake_case} placeholders in `template.subject` and
+ * `template.body` with values from `context`. Empty / missing values
+ * render as an empty string, and any line that became "Label: " with
+ * nothing after the colon is dropped so empty fields don't leave
+ * cosmetic stubs. Also collapses 3+ blank lines down to 2.
+ *
+ * Unknown placeholders are left intact so the admin sees them literally
+ * if they typo a name — clearer than silently losing content.
+ */
+function renderTemplate(template, context) {
+  const replaceIn = (s) =>
+    (s || '').replace(/\{(\w+)\}/g, (match, key) => {
+      if (Object.prototype.hasOwnProperty.call(context, key)) {
+        const v = context[key];
+        return v == null ? '' : String(v);
+      }
+      return match;
+    });
+  const subject = replaceIn(template.subject);
+  let body = replaceIn(template.body);
+  body = body
+    .split('\n')
+    .filter((line) => !/^\s*[^:\n]+:\s*$/.test(line))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  return { subject, body };
+}
 
 // Prepared statements
 const stmtInsert = db.prepare(`
@@ -1234,6 +1339,17 @@ const stmtFindCustomSlotByDateTime = db.prepare(
   `SELECT id, date, time FROM custom_slots WHERE date = ? AND time = ?`
 );
 const stmtDeleteCustomSlot = db.prepare(`DELETE FROM custom_slots WHERE id = ?`);
+
+// Template prepared statements
+const stmtListTemplates = db.prepare(
+  `SELECT name, subject, body, updated_at FROM templates ORDER BY name ASC`
+);
+const stmtFindTemplate = db.prepare(
+  `SELECT name, subject, body, updated_at FROM templates WHERE name = ?`
+);
+const stmtUpdateTemplate = db.prepare(
+  `UPDATE templates SET subject = ?, body = ?, updated_at = datetime('now') WHERE name = ?`
+);
 
 // Block-related prepared statements
 const stmtInsertBlock = db.prepare(`
@@ -2154,6 +2270,105 @@ app.delete('/api/users/:id', requireAdmin, (req, res) => {
   stmtDeleteUser.run(id);
   stmtDeleteSessionsForUser.run(id); // invalidate any active sessions
   res.json({ ok: true });
+});
+
+// ---- Message templates (admin-only writes, admin-only reads) -------------
+//
+// Two message templates are editable: the customer-facing confirmation
+// email and the public Zendesk cancellation comment. Placeholders use
+// {snake_case} — the available set is defined below and surfaced in the
+// admin UI so customers have a cheat-sheet.
+
+const TEMPLATE_META = {
+  confirmation_email: {
+    label: 'Confirmation email',
+    description:
+      'Emailed to the customer when they book or reschedule. ' +
+      'The "Reschedule / Cancel" button block is appended automatically ' +
+      'when APP_BASE_URL is set; it\'s not part of this template.',
+    has_subject: true,
+    placeholders: [
+      'first_name', 'name', 'when', 'date', 'time',
+      'phone', 'software_version', 'notes', 'ticket_id',
+    ],
+  },
+  cancellation_comment: {
+    label: 'Cancellation comment (Zendesk public)',
+    description:
+      'Posted as a public comment on the Zendesk ticket when an ' +
+      'appointment is canceled — Zendesk emails it to the customer.',
+    has_subject: false,
+    placeholders: [
+      'first_name', 'name', 'when', 'date', 'time',
+      'phone', 'reason', 'ticket_id',
+    ],
+  },
+};
+
+function templateRowToPublic(row) {
+  const meta = TEMPLATE_META[row.name] || {};
+  return {
+    name: row.name,
+    subject: row.subject || '',
+    body: row.body || '',
+    updated_at: row.updated_at,
+    label: meta.label || row.name,
+    description: meta.description || '',
+    has_subject: !!meta.has_subject,
+    placeholders: meta.placeholders || [],
+  };
+}
+
+app.get('/api/templates', requireAdmin, (_req, res) => {
+  res.json({ templates: stmtListTemplates.all().map(templateRowToPublic) });
+});
+
+app.get('/api/templates/:name', requireAdmin, (req, res) => {
+  const row = stmtFindTemplate.get(req.params.name);
+  if (!row) return res.status(404).json({ error: 'not found' });
+  res.json(templateRowToPublic(row));
+});
+
+app.put('/api/templates/:name', requireAdmin, (req, res) => {
+  const name = req.params.name;
+  const existing = stmtFindTemplate.get(name);
+  if (!existing) return res.status(404).json({ error: 'not found' });
+
+  const body = req.body || {};
+  const bodyStr = body.body != null ? String(body.body) : existing.body;
+  const meta = TEMPLATE_META[name] || {};
+  const subjectStr = meta.has_subject
+    ? (body.subject != null ? String(body.subject) : existing.subject)
+    : ''; // templates without a subject always have an empty one stored
+
+  if (!bodyStr.trim()) {
+    return res.status(400).json({ error: 'body is required' });
+  }
+  if (bodyStr.length > 10000) {
+    return res.status(400).json({ error: 'body is too long (max 10,000 chars)' });
+  }
+  if (meta.has_subject && !subjectStr.trim()) {
+    return res.status(400).json({ error: 'subject is required' });
+  }
+  if (subjectStr.length > 500) {
+    return res.status(400).json({ error: 'subject is too long (max 500 chars)' });
+  }
+
+  stmtUpdateTemplate.run(subjectStr, bodyStr, name);
+  const updated = stmtFindTemplate.get(name);
+  console.log(`[templates] ${name} updated by ${(getSession(req) || {}).username || 'admin'}`);
+  res.json(templateRowToPublic(updated));
+});
+
+// POST /api/templates/:name/reset — restore the hard-coded default.
+app.post('/api/templates/:name/reset', requireAdmin, (req, res) => {
+  const name = req.params.name;
+  const existing = stmtFindTemplate.get(name);
+  if (!existing) return res.status(404).json({ error: 'not found' });
+  const def = DEFAULT_TEMPLATES[name];
+  if (!def) return res.status(404).json({ error: 'no default known for this template' });
+  stmtUpdateTemplate.run(def.subject || '', def.body, name);
+  res.json(templateRowToPublic(stmtFindTemplate.get(name)));
 });
 
 // ---- Block management (admin-only) ---------------------------------------
