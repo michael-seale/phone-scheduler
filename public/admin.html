@@ -132,6 +132,24 @@
     .notes { max-width: 280px; white-space: pre-wrap; }
     .empty { padding: 28px; text-align: center; color: var(--muted); }
 
+    /* "My appointments only" toggle */
+    .toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #fff;
+      font-size: 13px;
+      color: var(--ink);
+      cursor: pointer;
+      user-select: none;
+    }
+    .toggle input { margin: 0; }
+    .toggle.on { background: var(--accent-weak); border-color: #c1cdf6; color: var(--accent); font-weight: 600; }
+    .ticket-link { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; }
+
     /* Slot grid (availability tab) */
     .legend { display: flex; gap: 14px; flex-wrap: wrap; margin: 4px 0 12px; font-size: 13px; color: var(--muted); }
     .legend .dot { display: inline-block; width: 10px; height: 10px; border-radius: 3px; vertical-align: middle; margin-right: 6px; }
@@ -212,13 +230,16 @@
     /* Users panel */
     .add-user {
       display: grid;
-      grid-template-columns: 1fr 1fr 140px auto;
+      grid-template-columns: 1fr 1fr 1fr 140px auto;
       gap: 10px;
       align-items: end;
     }
     .add-user label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; font-weight: 600; }
     .add-user input, .add-user select { width: 100%; }
-    @media (max-width: 720px) {
+    @media (max-width: 900px) {
+      .add-user { grid-template-columns: 1fr 1fr; }
+    }
+    @media (max-width: 520px) {
       .add-user { grid-template-columns: 1fr; }
     }
 
@@ -264,6 +285,14 @@
           <button id="addDateBtn" class="primary">Add</button>
           <button id="showAllBtn" class="ghost">Show all upcoming</button>
           <button id="refreshApptBtn" class="ghost">Refresh</button>
+
+          <!-- Only rendered when the signed-in user has a full_name set.
+               Filters the table to rows where the scheduler's assigned rep
+               matches the user's full name (case-insensitive). -->
+          <label id="mineToggle" class="toggle" hidden>
+            <input type="checkbox" id="mineCheckbox" />
+            My appointments only
+          </label>
         </div>
         <div class="chips" id="dateChips"></div>
         <div id="apptTable" style="margin-top: 14px;">
@@ -338,6 +367,10 @@
               <input type="text" id="newUsername" autocomplete="off" placeholder="alex" />
             </div>
             <div>
+              <label for="newFullName">Full name</label>
+              <input type="text" id="newFullName" autocomplete="off" placeholder="Alex Smith" />
+            </div>
+            <div>
               <label for="newPassword">Password</label>
               <input type="password" id="newPassword" autocomplete="new-password" placeholder="at least 6 chars" />
             </div>
@@ -407,7 +440,7 @@
   // The /admin page is served to any logged-in user. We fetch /api/me to
   // find out whether the current user is an admin or viewer, then show
   // or hide the Availability / Users panels accordingly.
-  let currentUser = { username: '', role: 'viewer' };
+  let currentUser = { username: '', role: 'viewer', full_name: '', zendesk_subdomain: '' };
   const whoami = document.getElementById('whoami');
   const availPanel = document.getElementById('availPanel');
   const usersPanel = document.getElementById('usersPanel');
@@ -416,15 +449,31 @@
     try {
       currentUser = await apiJson('/api/me');
     } catch (_) {
-      currentUser = { username: '', role: 'viewer' };
+      currentUser = { username: '', role: 'viewer', full_name: '', zendesk_subdomain: '' };
     }
+    // Display: "Alex Smith (alex)  [admin]" if a full name is set,
+    // otherwise just "alex  [admin]".
+    const name = currentUser.full_name
+      ? `<strong>${esc(currentUser.full_name)}</strong> <span class="muted">(${esc(currentUser.username)})</span>`
+      : `<strong>${esc(currentUser.username)}</strong>`;
     whoami.innerHTML =
-      `Signed in as <strong>${esc(currentUser.username)}</strong> ` +
+      `Signed in as ${name} ` +
       `<span class="pill ${currentUser.role === 'admin' ? 'admin' : 'viewer'}">${esc(currentUser.role)}</span>`;
     if (currentUser.role === 'admin') {
       availPanel.hidden = false;
       usersPanel.hidden = false;
     }
+    // The "My appointments" toggle only makes sense if the user has a
+    // full name we can match against the scheduler's assigned_rep.
+    if (currentUser.full_name) {
+      mineToggle.hidden = false;
+    }
+  }
+
+  /** Build the Zendesk URL for a ticket id, or return null if no subdomain. */
+  function zendeskTicketUrl(ticketId) {
+    if (!ticketId || !currentUser.zendesk_subdomain) return null;
+    return `https://${currentUser.zendesk_subdomain}.zendesk.com/agent/tickets/${ticketId}`;
   }
 
   /* ====================== APPOINTMENTS TAB ===================== */
@@ -435,6 +484,15 @@
   const dateChips = document.getElementById('dateChips');
   const apptTable = document.getElementById('apptTable');
   const apptCount = document.getElementById('apptCount');
+  const mineToggle = document.getElementById('mineToggle');
+  const mineCheckbox = document.getElementById('mineCheckbox');
+
+  // When the checkbox flips, just re-render from the already-fetched rows.
+  let lastRows = [];
+  mineCheckbox.addEventListener('change', () => {
+    mineToggle.classList.toggle('on', mineCheckbox.checked);
+    renderAppointments(lastRows);
+  });
 
   // Selected dates (a Set of YYYY-MM-DD). Empty = "show all upcoming".
   const selectedDates = new Set();
@@ -500,15 +558,31 @@
       apptTable.innerHTML = '<div class="empty">Couldn\'t load appointments.</div>';
       return;
     }
+    lastRows = rows;
     renderAppointments(rows);
   }
 
-  function renderAppointments(rows) {
-    apptCount.textContent = rows.length
-      ? `${rows.length} appointment${rows.length === 1 ? '' : 's'}`
+  function renderAppointments(allRows) {
+    // Apply the "My appointments only" filter (purely client-side).
+    let rows = allRows;
+    if (mineCheckbox.checked && currentUser.full_name) {
+      const me = currentUser.full_name.trim().toLowerCase();
+      rows = allRows.filter(
+        (r) => r.assigned_rep && r.assigned_rep.trim().toLowerCase() === me
+      );
+    }
+
+    const totalText = allRows.length
+      ? `${rows.length}${rows.length !== allRows.length ? ' / ' + allRows.length : ''}` +
+        ` appointment${rows.length === 1 ? '' : 's'}`
       : '';
+    apptCount.textContent = totalText;
+
     if (rows.length === 0) {
-      apptTable.innerHTML = '<div class="empty">No appointments for the selected dates.</div>';
+      const emptyMsg = mineCheckbox.checked
+        ? `No appointments assigned to ${esc(currentUser.full_name)} in this range.`
+        : 'No appointments for the selected dates.';
+      apptTable.innerHTML = `<div class="empty">${emptyMsg}</div>`;
       return;
     }
     // Viewers don't get a Cancel button — that's an admin action.
@@ -517,24 +591,42 @@
       <table>
         <thead>
           <tr>
-            <th>Date</th><th>Time</th><th>Name</th><th>Email</th>
-            <th>Phone</th><th>Version</th><th>Notes</th><th>Source</th>${showCancel ? '<th></th>' : ''}
+            <th>Date</th>
+            <th>Time</th>
+            <th>Name</th>
+            <th>Email</th>
+            <th>Phone</th>
+            <th>Source</th>
+            <th>Zendesk</th>
+            <th>Assignee</th>
+            ${showCancel ? '<th></th>' : ''}
           </tr>
         </thead>
         <tbody>
-          ${rows.map(r => `
-            <tr data-id="${r.id}">
-              <td>${esc(r.date)}</td>
-              <td><strong>${esc(r.time)}</strong></td>
-              <td>${esc(r.name)}</td>
-              <td><a href="mailto:${esc(r.email)}">${esc(r.email)}</a></td>
-              <td>${esc(r.phone)}</td>
-              <td>${esc(r.software_version)}</td>
-              <td class="notes">${esc(r.notes)}</td>
-              <td><span class="pill ${r.source === 'api' ? 'api' : 'web'}">${esc(r.source)}</span></td>
-              ${showCancel ? `<td><button class="danger" data-cancel="${r.id}">Cancel</button></td>` : ''}
-            </tr>
-          `).join('')}
+          ${rows.map(r => {
+            const ticketUrl = zendeskTicketUrl(r.zendesk_ticket_id);
+            const ticketCell = r.zendesk_ticket_id
+              ? (ticketUrl
+                  ? `<a class="ticket-link" href="${esc(ticketUrl)}" target="_blank" rel="noopener">#${esc(r.zendesk_ticket_id)}</a>`
+                  : `<span class="ticket-link">#${esc(r.zendesk_ticket_id)}</span>`)
+              : '<span class="muted">—</span>';
+            const assigneeCell = r.assigned_rep
+              ? esc(r.assigned_rep)
+              : '<span class="muted">—</span>';
+            return `
+              <tr data-id="${r.id}">
+                <td>${esc(r.date)}</td>
+                <td><strong>${esc(r.time)}</strong></td>
+                <td>${esc(r.name)}</td>
+                <td><a href="mailto:${esc(r.email)}">${esc(r.email)}</a></td>
+                <td>${esc(r.phone)}</td>
+                <td><span class="pill ${r.source === 'api' ? 'api' : 'web'}">${esc(r.source)}</span></td>
+                <td>${ticketCell}</td>
+                <td>${assigneeCell}</td>
+                ${showCancel ? `<td><button class="danger" data-cancel="${r.id}">Cancel</button></td>` : ''}
+              </tr>
+            `;
+          }).join('')}
         </tbody>
       </table>
     `;
@@ -741,6 +833,7 @@
   const userTable    = document.getElementById('userTable');
   const userMsg      = document.getElementById('userMsg');
   const newUsername  = document.getElementById('newUsername');
+  const newFullName  = document.getElementById('newFullName');
   const newPassword  = document.getElementById('newPassword');
   const newRole      = document.getElementById('newRole');
   const addUserBtn   = document.getElementById('addUserBtn');
@@ -773,12 +866,19 @@
     userTable.innerHTML = `
       <table>
         <thead>
-          <tr><th>Username</th><th>Role</th><th>Created</th><th></th></tr>
+          <tr>
+            <th>Username</th>
+            <th>Full name</th>
+            <th>Role</th>
+            <th>Created</th>
+            <th></th>
+          </tr>
         </thead>
         <tbody>
           ${users.map((u) => `
             <tr data-uid="${u.id}">
               <td>${esc(u.username)}</td>
+              <td>${u.full_name ? esc(u.full_name) : '<span class="muted">—</span>'}</td>
               <td>
                 <select data-role-for="${u.id}">
                   <option value="viewer" ${u.role === 'viewer' ? 'selected' : ''}>Viewer</option>
@@ -787,7 +887,8 @@
               </td>
               <td class="muted">${esc(u.created_at || '')}</td>
               <td>
-                <button class="ghost"  data-reset-pw="${u.id}" data-username="${esc(u.username)}">Reset password</button>
+                <button class="ghost"  data-set-name="${u.id}"  data-username="${esc(u.username)}" data-full-name="${esc(u.full_name || '')}">Set name</button>
+                <button class="ghost"  data-reset-pw="${u.id}"  data-username="${esc(u.username)}">Reset password</button>
                 <button class="danger" data-delete-user="${u.id}" data-username="${esc(u.username)}">Delete</button>
               </td>
             </tr>
@@ -810,6 +911,29 @@
         } catch (err) {
           showUserMsg(err.message || 'Failed to update role.', 'err');
           loadUsers();
+        }
+      });
+    });
+    userTable.querySelectorAll('[data-set-name]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const id = btn.dataset.setName;
+        const username = btn.dataset.username;
+        const current = btn.dataset.fullName || '';
+        const name = prompt(
+          `Full name for "${username}" (leave blank to clear):`,
+          current
+        );
+        if (name === null) return; // cancelled
+        try {
+          await apiJson('/api/users/' + id, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ full_name: name }),
+          });
+          showUserMsg(`Updated name for "${username}".`, 'ok');
+          loadUsers();
+        } catch (err) {
+          showUserMsg(err.message || 'Failed to set name.', 'err');
         }
       });
     });
@@ -849,6 +973,7 @@
 
   async function addUser() {
     const username = newUsername.value.trim();
+    const full_name = newFullName.value.trim();
     const password = newPassword.value;
     const role = newRole.value;
     if (!username || !password) {
@@ -858,9 +983,10 @@
       await apiJson('/api/users', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password, role }),
+        body: JSON.stringify({ username, full_name, password, role }),
       });
       newUsername.value = '';
+      newFullName.value = '';
       newPassword.value = '';
       newRole.value = 'viewer';
       showUserMsg(`Added user "${username}" as ${role}.`, 'ok');

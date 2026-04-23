@@ -187,13 +187,9 @@ async function resolveZendeskAssignee(schedulerName) {
 async function createZendeskTicket(appt) {
   if (!zendeskEnabled) return null;
 
-  // Who's scheduled on phones? Same lookup that used to fill in the email subject.
-  let assignedRep = null;
-  try {
-    assignedRep = await lookupAssignedRep(appt);
-  } catch (e) {
-    console.warn('[zendesk] rep lookup threw:', e.message);
-  }
+  // The assigned rep was looked up and stored on the appointment before
+  // we were called (see POST /api/appointments). Use that name directly.
+  const assignedRep = appt.assigned_rep || null;
   const assignee_id = await resolveZendeskAssignee(assignedRep);
 
   const whenLine = formatWhenForCustomer(appt.date, appt.time, appt.timezone);
@@ -928,6 +924,29 @@ db.exec(`
   }
 })();
 
+// ---- Migration: users.full_name ------------------------------------------
+// Optional "real name" stored alongside the login username. Used in the UI
+// header ("Signed in as Alex Smith") and for matching appointments to
+// their assigned rep in the "My appointments" toggle.
+(function migrateUsersFullName() {
+  const cols = db.prepare(`PRAGMA table_info(users)`).all();
+  if (!cols.some((c) => c.name === 'full_name')) {
+    db.exec(`ALTER TABLE users ADD COLUMN full_name TEXT`);
+  }
+})();
+
+// ---- Migration: appointments.assigned_rep --------------------------------
+// The name of the rep scheduled to take the call at the appointment's time,
+// as returned by the RenewedVision scheduler (e.g. "Riley Harmon"). Stored
+// at booking time so the admin appointment list can show it, and so the
+// "My appointments" toggle works even when Zendesk is disabled.
+(function migrateAssignedRep() {
+  const cols = db.prepare(`PRAGMA table_info(appointments)`).all();
+  if (!cols.some((c) => c.name === 'assigned_rep')) {
+    db.exec(`ALTER TABLE appointments ADD COLUMN assigned_rep TEXT`);
+  }
+})();
+
 // ---- Migration: zendesk_ticket_id column ---------------------------------
 // Stored on each appointment so reschedule/cancel can update the SAME ticket
 // instead of spawning new ones. NULL for rows created before the integration
@@ -998,6 +1017,9 @@ const stmtFindById = db.prepare(`SELECT * FROM appointments WHERE id = ?`);
 const stmtUpdateZendeskTicketId = db.prepare(
   `UPDATE appointments SET zendesk_ticket_id = ? WHERE id = ?`
 );
+const stmtUpdateAssignedRep = db.prepare(
+  `UPDATE appointments SET assigned_rep = ? WHERE id = ?`
+);
 
 // Cancel / reschedule lookups by the per-appointment secret token.
 const stmtFindByToken = db.prepare(`
@@ -1029,19 +1051,25 @@ const stmtDeleteSessionsForUser = db.prepare(
 
 // User-related prepared statements
 const stmtInsertUser = db.prepare(
-  `INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)`
+  `INSERT INTO users (username, password_hash, role, full_name)
+   VALUES (?, ?, ?, ?)`
 );
 const stmtListUsers = db.prepare(
-  `SELECT id, username, role, created_at FROM users ORDER BY username ASC`
+  `SELECT id, username, role, full_name, created_at
+     FROM users ORDER BY username ASC`
 );
 const stmtFindUserByName = db.prepare(
-  `SELECT id, username, password_hash, role FROM users WHERE username = ?`
+  `SELECT id, username, password_hash, role, full_name
+     FROM users WHERE username = ?`
 );
 const stmtFindUserById = db.prepare(
-  `SELECT id, username, role FROM users WHERE id = ?`
+  `SELECT id, username, role, full_name FROM users WHERE id = ?`
 );
 const stmtUpdateUserRole = db.prepare(
   `UPDATE users SET role = ? WHERE id = ?`
+);
+const stmtUpdateUserFullName = db.prepare(
+  `UPDATE users SET full_name = ? WHERE id = ?`
 );
 const stmtUpdateUserPassword = db.prepare(
   `UPDATE users SET password_hash = ? WHERE id = ?`
@@ -1249,10 +1277,24 @@ app.get('/admin', requireUser, (_req, res) => {
 });
 
 // /api/me — returns the current user's identity so the admin page can
-// decide which panels to render. Safe for any logged-in user.
+// decide which panels to render. Also returns the Zendesk subdomain (if
+// configured) so the page can build links to tickets. Safe for any
+// logged-in user.
 app.get('/api/me', requireUser, (req, res) => {
   const s = getSession(req);
-  res.json({ username: s.username, role: s.role });
+  // full_name only exists on real user rows (not on the ADMIN_PASSWORD
+  // root login, which has user_id = NULL).
+  let fullName = '';
+  if (s.user_id) {
+    const u = stmtFindUserById.get(s.user_id);
+    if (u && u.full_name) fullName = u.full_name;
+  }
+  res.json({
+    username: s.username,
+    role: s.role,
+    full_name: fullName,
+    zendesk_subdomain: ZENDESK_SUBDOMAIN || '',
+  });
 });
 
 // ---- Public API ----------------------------------------------------------
@@ -1441,12 +1483,25 @@ app.post('/api/appointments', (req, res) => {
       timezone,
     };
     // Fire-and-forget side effects: don't block the customer's response.
-    //   1. Create a Zendesk ticket (replaces the old support@ email).
-    //      When the ticket is created we save its id on the appointment row
-    //      so reschedule/cancel can update the SAME ticket later.
-    //   2. Send the customer their confirmation email.
-    // Either failing doesn't affect the other.
+    //   1. Ask the RenewedVision scheduler who's on phones at this time and
+    //      store that name on the appointment row. This powers the admin
+    //      "Assignee" column and the "My appointments" toggle — and it
+    //      happens even when Zendesk is disabled.
+    //   2. Create a Zendesk ticket (replaces the old support@ email). When
+    //      the ticket is created we save its id on the appointment row so
+    //      reschedule/cancel can update the SAME ticket later.
+    //   3. Send the customer their confirmation email.
+    // Each step failing doesn't affect the others.
     (async () => {
+      try {
+        const assignedRep = await lookupAssignedRep(appt);
+        if (assignedRep) {
+          stmtUpdateAssignedRep.run(assignedRep, appt.id);
+          appt.assigned_rep = assignedRep;
+        }
+      } catch (e) {
+        console.error('[rv-sched] unexpected error (assign):', e);
+      }
       try {
         const ticketId = await createZendeskTicket(appt);
         if (ticketId) {
@@ -1587,11 +1642,23 @@ app.post('/api/appointments/reschedule', (req, res) => {
     sendCustomerConfirmation(updated).catch((e) =>
       console.error('[email] unexpected error (reschedule confirmation):', e)
     );
-    // Zendesk: if a ticket was created for this appointment, drop an
-    // internal comment with the old → new times. If for some reason we
-    // don't have a ticket id (legacy row, Zendesk was disabled at booking
-    // time), create a fresh ticket so the team still has visibility.
+    // Post-reschedule side effects (fire-and-forget):
+    //   1. The time changed, so the on-phones rep likely changed too.
+    //      Re-look up and update assigned_rep.
+    //   2. Zendesk: if a ticket was created for this appointment, drop an
+    //      internal comment with the old → new times. If for some reason
+    //      we don't have a ticket id (legacy row, Zendesk was disabled at
+    //      booking time), create a fresh ticket.
     (async () => {
+      try {
+        const newRep = await lookupAssignedRep(updated);
+        if (newRep !== updated.assigned_rep) {
+          stmtUpdateAssignedRep.run(newRep || null, updated.id);
+          updated.assigned_rep = newRep || null;
+        }
+      } catch (e) {
+        console.error('[rv-sched] unexpected error (reschedule assign):', e);
+      }
       try {
         const oldWhen = formatWhenForCustomer(existing.date, existing.time, existing.timezone);
         const newWhen = formatWhenForCustomer(updated.date, updated.time, updated.timezone);
@@ -1678,7 +1745,13 @@ app.delete('/api/appointments/:id', requireAdmin, (req, res) => {
 // Roles: 'admin' (full access) | 'viewer' (read-only appointment list).
 
 function userRowToPublic(u) {
-  return { id: u.id, username: u.username, role: u.role, created_at: u.created_at };
+  return {
+    id: u.id,
+    username: u.username,
+    role: u.role,
+    full_name: u.full_name || '',
+    created_at: u.created_at,
+  };
 }
 
 app.get('/api/users', requireAdmin, (_req, res) => {
@@ -1690,6 +1763,9 @@ app.post('/api/users', requireAdmin, (req, res) => {
   const username = String(body.username || '').trim();
   const password = String(body.password || '');
   const role = String(body.role || '').trim();
+  // Optional. Shown in the header and used to match against the scheduler's
+  // assigned-rep name when an admin toggles "My appointments only".
+  const fullName = body.full_name != null ? String(body.full_name).trim() : '';
 
   if (!isValidUsername(username)) {
     return res
@@ -1708,9 +1784,17 @@ app.post('/api/users', requireAdmin, (req, res) => {
   if (role !== 'admin' && role !== 'viewer') {
     return res.status(400).json({ error: 'role must be "admin" or "viewer"' });
   }
+  if (fullName.length > 100) {
+    return res.status(400).json({ error: 'full name is too long (max 100 chars)' });
+  }
 
   try {
-    const result = stmtInsertUser.run(username, hashPassword(password), role);
+    const result = stmtInsertUser.run(
+      username,
+      hashPassword(password),
+      role,
+      fullName || null
+    );
     const created = stmtFindUserById.get(result.lastInsertRowid);
     res.status(201).json(userRowToPublic({
       ...created,
@@ -1755,12 +1839,22 @@ app.patch('/api/users/:id', requireAdmin, (req, res) => {
     }
     updates.password_hash = hashPassword(pw);
   }
+  if (body.full_name !== undefined) {
+    const fn = String(body.full_name || '').trim();
+    if (fn.length > 100) {
+      return res.status(400).json({ error: 'full name is too long (max 100 chars)' });
+    }
+    updates.full_name = fn || null;
+  }
 
   if (Object.keys(updates).length === 0) {
     return res.status(400).json({ error: 'nothing to update' });
   }
 
   if (updates.role) stmtUpdateUserRole.run(updates.role, id);
+  if (Object.prototype.hasOwnProperty.call(updates, 'full_name')) {
+    stmtUpdateUserFullName.run(updates.full_name, id);
+  }
   if (updates.password_hash) {
     stmtUpdateUserPassword.run(updates.password_hash, id);
     // Force re-login after a password change.
