@@ -128,6 +128,25 @@ services:
       - key: ZENDESK_TAGS
         sync: false
 
+      # ---- Zendesk "Product" custom field (optional) ----
+      # Fills out a Zendesk dropdown/tagger custom field on each new
+      # ticket based on the customer's software_version input.
+      #
+      # Find the field ID in Zendesk: Admin Center → Objects and rules →
+      # Tickets → Fields → click "Product" and copy the numeric id from
+      # the URL (https://<sub>.zendesk.com/admin/.../ticket_fields/<ID>).
+      - key: ZENDESK_PRODUCT_FIELD_ID
+        sync: false
+
+      # Comma-separated mapping from software_version (what the customer
+      # typed on the booking page) to the Zendesk dropdown tagger value.
+      # Lookup is case-insensitive; unmapped values leave the Product
+      # field empty and log a diagnostic on the server.
+      # Example:
+      #   "ProPresenter 7=propresenter_7,PVP 4=pvp_4,ProPrompter=proprompter"
+      - key: ZENDESK_PRODUCT_MAP
+        sync: false
+
       # ---- RenewedVision Scheduler (who's-on-phones lookup) ----
       # The server reads `lib/scheduler-client.js` from the repo at startup
       # and runs it in a sandbox to get the RenewedVisionScheduler global.

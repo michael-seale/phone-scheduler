@@ -106,6 +106,13 @@ const ZENDESK_AGENT_MAP_RAW = process.env.ZENDESK_AGENT_MAP || '';
 // can't contain spaces (Zendesk replaces spaces with underscores), so we
 // normalize here: lowercase, trim, and skip empties.
 const ZENDESK_TAGS_RAW = process.env.ZENDESK_TAGS || '';
+// Custom "Product" dropdown field. FIELD_ID is the numeric id from
+// Admin Center → Objects and rules → Tickets → Fields (click the field
+// and check the URL). MAP is "human input=tagger value" pairs, e.g.:
+//   "ProPresenter 7=propresenter_7,PVP 4=pvp_4"
+// The lookup is case-insensitive against the customer's software_version.
+const ZENDESK_PRODUCT_FIELD_ID_RAW = process.env.ZENDESK_PRODUCT_FIELD_ID || '';
+const ZENDESK_PRODUCT_MAP_RAW     = process.env.ZENDESK_PRODUCT_MAP || '';
 // Override for Zendesk Sandbox (e.g. https://renewedvision1234.zendesk.com)
 // or local tests. Leave unset in production.
 const ZENDESK_BASE_URL  = (process.env.ZENDESK_BASE_URL || '').replace(/\/+$/, '');
@@ -130,6 +137,45 @@ const zendeskTags = ZENDESK_TAGS_RAW.trim()
       // here so what we send matches what'll land in the ticket.
       .map((t) => t.replace(/\s+/g, '_'))
   : ['phone-appointment', 'scheduler'];
+
+// Parse ZENDESK_PRODUCT_FIELD_ID + ZENDESK_PRODUCT_MAP. Both must be set
+// for the feature to do anything. The field id is a Zendesk custom-field
+// id (integer); the map is lowercased on the input side so matches are
+// case-insensitive. Setting only one logs a warning so the user sees the
+// misconfig rather than silent no-op.
+const zendeskProductFieldId = Number(ZENDESK_PRODUCT_FIELD_ID_RAW) || null;
+const zendeskProductMap = new Map();
+for (const pair of ZENDESK_PRODUCT_MAP_RAW.split(',')) {
+  const idx = pair.indexOf('=');
+  if (idx < 0) continue;
+  const key = pair.slice(0, idx).trim().toLowerCase();
+  const val = pair.slice(idx + 1).trim();
+  if (key && val) zendeskProductMap.set(key, val);
+}
+if (zendeskProductFieldId && zendeskProductMap.size === 0) {
+  console.warn(
+    '[zendesk] ZENDESK_PRODUCT_FIELD_ID is set but ZENDESK_PRODUCT_MAP is empty — ' +
+      'Product field will never be populated. Add software_version mappings.'
+  );
+}
+if (!zendeskProductFieldId && zendeskProductMap.size > 0) {
+  console.warn(
+    '[zendesk] ZENDESK_PRODUCT_MAP is set but ZENDESK_PRODUCT_FIELD_ID is missing — ' +
+      'Product field mapping will not be applied.'
+  );
+}
+
+/**
+ * Resolve a software_version string to its Zendesk Product tagger value
+ * using ZENDESK_PRODUCT_MAP. Returns null when no mapping matches (including
+ * when the input is blank) so the caller can decide to skip the field.
+ */
+function resolveProductTaggerValue(softwareVersion) {
+  if (!zendeskProductFieldId || zendeskProductMap.size === 0) return null;
+  const key = String(softwareVersion || '').trim().toLowerCase();
+  if (!key) return null;
+  return zendeskProductMap.get(key) || null;
+}
 
 // Cache email → Zendesk user_id so we don't hit /users/search.json on every
 // booking. Agents don't change emails often; in-memory is fine.
@@ -237,6 +283,21 @@ async function createZendeskTicket(appt) {
     tags: zendeskTags,
   };
   if (assignee_id) ticket.assignee_id = assignee_id;
+
+  // Populate the Product custom field (if configured) from software_version.
+  // Unmapped inputs leave the field empty and log a diagnostic so the admin
+  // can extend ZENDESK_PRODUCT_MAP without guessing what to add.
+  if (zendeskProductFieldId) {
+    const productValue = resolveProductTaggerValue(appt.software_version);
+    if (productValue) {
+      ticket.custom_fields = [{ id: zendeskProductFieldId, value: productValue }];
+    } else if ((appt.software_version || '').trim()) {
+      console.log(
+        `[zendesk] no ZENDESK_PRODUCT_MAP entry for software_version="${appt.software_version}"` +
+          ` — Product field left blank on ticket for appt #${appt.id}`
+      );
+    }
+  }
 
   try {
     const res = await fetch(zendeskUrl('/tickets.json'), {
@@ -2589,10 +2650,15 @@ app.listen(PORT, () => {
     console.log(`  External API is open (no API_KEY set).`);
   }
   if (zendeskEnabled) {
+    const productBit = zendeskProductFieldId
+      ? `, product field ${zendeskProductFieldId} (${zendeskProductMap.size} mappings)`
+      : '';
     console.log(
       `  Zendesk   : enabled — https://${ZENDESK_SUBDOMAIN}.zendesk.com` +
         ` (agent map: ${zendeskAgentMap.size} entries` +
-        `, tags: ${zendeskTags.join(', ') || '(none)'})`
+        `, tags: ${zendeskTags.join(', ') || '(none)'}` +
+        productBit +
+        `)`
     );
   } else {
     console.log(
