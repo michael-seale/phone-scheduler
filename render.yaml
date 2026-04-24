@@ -119,6 +119,15 @@ services:
       - key: ZENDESK_AGENT_MAP
         sync: false
 
+      # Comma-separated list of tags to apply to every booking ticket.
+      # Zendesk tags are case-sensitive and can't contain spaces
+      # (spaces are auto-converted to underscores).
+      # Example:
+      #   "phone-appointment,scheduler,propresenter"
+      # If unset, defaults to: phone-appointment, scheduler
+      - key: ZENDESK_TAGS
+        sync: false
+
       # ---- RenewedVision Scheduler (who's-on-phones lookup) ----
       # The server reads `lib/scheduler-client.js` from the repo at startup
       # and runs it in a sandbox to get the RenewedVisionScheduler global.

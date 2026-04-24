@@ -101,6 +101,11 @@ const ZENDESK_SUBDOMAIN = (process.env.ZENDESK_SUBDOMAIN || '').trim();
 const ZENDESK_EMAIL     = (process.env.ZENDESK_EMAIL || '').trim();
 const ZENDESK_TOKEN     = (process.env.ZENDESK_TOKEN || '').trim();
 const ZENDESK_AGENT_MAP_RAW = process.env.ZENDESK_AGENT_MAP || '';
+// Comma-separated list of tags to apply to every booking ticket. Unset →
+// falls back to the legacy defaults. Zendesk tags are case-sensitive and
+// can't contain spaces (Zendesk replaces spaces with underscores), so we
+// normalize here: lowercase, trim, and skip empties.
+const ZENDESK_TAGS_RAW = process.env.ZENDESK_TAGS || '';
 // Override for Zendesk Sandbox (e.g. https://renewedvision1234.zendesk.com)
 // or local tests. Leave unset in production.
 const ZENDESK_BASE_URL  = (process.env.ZENDESK_BASE_URL || '').replace(/\/+$/, '');
@@ -113,6 +118,18 @@ for (const pair of ZENDESK_AGENT_MAP_RAW.split(',')) {
   const [name, email] = pair.split('=').map((s) => (s || '').trim());
   if (name && email) zendeskAgentMap.set(name.toLowerCase(), email);
 }
+
+// Parse ZENDESK_TAGS into an array. Empty env var → legacy defaults so
+// existing deployments don't lose their tags when this release ships.
+const zendeskTags = ZENDESK_TAGS_RAW.trim()
+  ? ZENDESK_TAGS_RAW
+      .split(',')
+      .map((t) => t.trim())
+      .filter(Boolean)
+      // Zendesk converts spaces to underscores client-side anyway; do it
+      // here so what we send matches what'll land in the ticket.
+      .map((t) => t.replace(/\s+/g, '_'))
+  : ['phone-appointment', 'scheduler'];
 
 // Cache email → Zendesk user_id so we don't hit /users/search.json on every
 // booking. Agents don't change emails often; in-memory is fine.
@@ -217,7 +234,7 @@ async function createZendeskTicket(appt) {
       (assignedRep ? ` with ${assignedRep}` : ''),
     comment: { body: bodyLines.join('\n'), public: false },
     requester: { name: appt.name, email: appt.email },
-    tags: ['phone-appointment', 'scheduler'],
+    tags: zendeskTags,
   };
   if (assignee_id) ticket.assignee_id = assignee_id;
 
@@ -2574,7 +2591,8 @@ app.listen(PORT, () => {
   if (zendeskEnabled) {
     console.log(
       `  Zendesk   : enabled — https://${ZENDESK_SUBDOMAIN}.zendesk.com` +
-        ` (agent map: ${zendeskAgentMap.size} entries)`
+        ` (agent map: ${zendeskAgentMap.size} entries` +
+        `, tags: ${zendeskTags.join(', ') || '(none)'})`
     );
   } else {
     console.log(
