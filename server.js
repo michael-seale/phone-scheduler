@@ -1781,7 +1781,7 @@ app.get('/api/next-available-dates', (req, res) => {
 });
 
 // Create an appointment. Used by the booking page AND external services.
-app.post('/api/appointments', (req, res) => {
+app.post('/api/appointments', async (req, res) => {
   // Enforce API key for external callers (only if configured).
   if (API_KEY) {
     const providedKey = req.header('X-API-Key');
@@ -1869,17 +1869,23 @@ app.post('/api/appointments', (req, res) => {
       cancel_token,
       timezone,
     };
-    // Fire-and-forget side effects: don't block the customer's response.
-    //   1. Ask the RenewedVision scheduler who's on phones at this time and
-    //      store that name on the appointment row. This powers the admin
-    //      "Assignee" column and the "My appointments" toggle — and it
-    //      happens even when Zendesk is disabled.
-    //   2. Create a Zendesk ticket (replaces the old support@ email). When
-    //      the ticket is created we save its id on the appointment row so
-    //      reschedule/cancel can update the SAME ticket later.
+    // Side effects after a successful insert:
+    //   1. Ask the RenewedVision scheduler who's on phones at this time
+    //      and store that name on the appointment row (powers the admin
+    //      "Assignee" column and the "My appointments" toggle).
+    //   2. Create a Zendesk ticket (replaces the old support@ email).
+    //      The ticket id is stored on the appointment row so reschedule
+    //      and cancel can update the SAME ticket later.
     //   3. Send the customer their confirmation email.
-    // Each step failing doesn't affect the others.
-    (async () => {
+    //
+    // For third-party API callers we AWAIT steps 1+2 so the JSON response
+    // includes zendesk_ticket_id — they explicitly need it for downstream
+    // systems. The confirmation email (slow, always a few seconds) stays
+    // fire-and-forget either way.
+    //
+    // For browser bookings we fire the whole chain and forget so the
+    // customer's booking UI doesn't wait on SMTP or Zendesk.
+    const assignAndTicket = async () => {
       try {
         const assignedRep = await lookupAssignedRep(appt);
         if (assignedRep) {
@@ -1898,15 +1904,21 @@ app.post('/api/appointments', (req, res) => {
       } catch (e) {
         console.error('[zendesk] unexpected error (create):', e);
       }
-      // Send the confirmation email AFTER Zendesk ticket creation so the
-      // email can include the ticket reference number. Still inside the
-      // same async block so the HTTP response isn't blocked on SMTP.
-      try {
-        await sendCustomerConfirmation(appt);
-      } catch (e) {
-        console.error('[email] unexpected error (confirmation):', e);
-      }
-    })();
+    };
+    const sendEmail = () =>
+      sendCustomerConfirmation(appt).catch((e) =>
+        console.error('[email] unexpected error (confirmation):', e)
+      );
+
+    if (source === 'api') {
+      await assignAndTicket();
+      sendEmail(); // fire-and-forget; don't make API clients wait on SMTP
+    } else {
+      (async () => {
+        await assignAndTicket();
+        await sendEmail();
+      })();
+    }
     res.status(201).json(appt);
   } catch (err) {
     // node:sqlite raises errcode 2067 (SQLITE_CONSTRAINT_UNIQUE) when our
