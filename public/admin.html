@@ -107,7 +107,39 @@
     .pill.api { background: #fff3e0; color: var(--warn); }
     .pill.admin { background: #e8f5ef; color: var(--ok); }
     .pill.viewer { background: #f3f4f6; color: var(--muted); }
+    .pill.creator { background: #fff3e0; color: var(--warn); }
+    .pill.pending { background: #f3f4f6; color: var(--muted); }
+    .pill.completed { background: #e8f5ef; color: var(--ok); }
+    .pill.declined { background: #fdecea; color: var(--err); }
     .pill.custom { background: #fff3e0; color: var(--warn); margin-left: 6px; font-size: 10px; }
+
+    /* Feature-request action buttons */
+    .fr-action {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 32px;
+      height: 32px;
+      padding: 0;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #fff;
+      cursor: pointer;
+      font-size: 16px;
+      line-height: 1;
+      margin-right: 4px;
+    }
+    .fr-action.complete { color: var(--ok); border-color: #b9e1c8; }
+    .fr-action.complete:hover { background: #e8f5ef; }
+    .fr-action.decline  { color: var(--err); border-color: #f3c6c1; }
+    .fr-action.decline:hover { background: #fdecea; }
+    .fr-action:disabled { opacity: .55; cursor: not-allowed; }
+    .fr-desc {
+      white-space: pre-wrap;
+      max-width: 480px;
+      line-height: 1.4;
+    }
+    .fr-meta { font-size: 12px; color: var(--muted); }
     .notes { max-width: 280px; white-space: pre-wrap; }
     .empty { padding: 28px; text-align: center; color: var(--muted); }
 
@@ -385,13 +417,17 @@
       color: var(--muted);
       margin: 10px 0 4px;
     }
-    .modal-card input[type="password"] {
+    .modal-card input[type="password"],
+    .modal-card textarea {
       width: 100%;
       padding: 10px 12px;
       border-radius: 8px;
       border: 1px solid var(--border);
       font-size: 14px;
+      font-family: inherit;
+      resize: vertical;
     }
+    .modal-card textarea { line-height: 1.4; min-height: 120px; }
     .modal-card .actions {
       display: flex;
       gap: 8px;
@@ -423,12 +459,33 @@
       <h1>Scheduler</h1>
       <div class="row">
         <span class="whoami" id="whoami"></span>
+        <button type="button" id="requestFeatureBtn" class="ghost" hidden>Request a Feature</button>
         <button type="button" id="changePwBtn" class="ghost" hidden>Change password</button>
         <form class="logout" method="post" action="/logout">
           <button type="submit" class="ghost">Log out</button>
         </form>
       </div>
     </header>
+
+    <!-- Request-a-feature modal. Shown when an admin or creator clicks
+         the header button. Posts to /api/feature-requests and closes. -->
+    <div id="frModal" class="modal-overlay" hidden>
+      <div class="modal-card">
+        <h3>Request a Feature</h3>
+        <form id="frForm">
+          <label for="frDescription">What would you like to see?</label>
+          <textarea id="frDescription" rows="6" maxlength="4000"
+                    placeholder="A short description of the feature or change you'd like…" required></textarea>
+
+          <div class="modal-msg" id="frMsg"></div>
+
+          <div class="actions">
+            <button type="button" class="ghost"  id="frCancel">Cancel</button>
+            <button type="submit" class="primary" id="frSubmit">Submit request</button>
+          </div>
+        </form>
+      </div>
+    </div>
 
     <!-- Change-password modal (populated only on demand). Shown for all
          non-root users. Required current password guards against session
@@ -573,6 +630,7 @@
               <select id="newRole">
                 <option value="viewer">Viewer</option>
                 <option value="admin">Admin</option>
+                <option value="creator">Creator</option>
               </select>
             </div>
             <div>
@@ -605,6 +663,23 @@
           "Label: value" line so you never get dangling labels.
         </p>
         <div id="templateList">
+          <div class="empty">Loading…</div>
+        </div>
+      </div>
+    </details>
+
+    <!-- ===================== FEATURE REQUESTS ===================== -->
+    <details class="panel" id="featureRequestsPanel" hidden>
+      <summary>
+        <span class="title"><span class="chev"></span>Feature Requests</span>
+        <span class="muted" id="featureRequestsCount"></span>
+      </summary>
+      <div class="panel-body">
+        <p class="muted" style="margin: 0 0 12px;">
+          Submitted from the "Request a Feature" button in the header.
+          Click ✓ to mark a request complete, or ✗ to decline it.
+        </p>
+        <div id="featureRequestsList">
           <div class="empty">Loading…</div>
         </div>
       </div>
@@ -659,6 +734,12 @@
   const usersPanel = document.getElementById('usersPanel');
   const changePwBtn = document.getElementById('changePwBtn');
   const templatesPanel = document.getElementById('templatesPanel');
+  const featureRequestsPanel = document.getElementById('featureRequestsPanel');
+  const requestFeatureBtn = document.getElementById('requestFeatureBtn');
+
+  // Admin-equivalent: admin OR creator both unlock the management surfaces.
+  // Creator is a superset that also sees the Feature Requests panel.
+  const canAdmin = () => currentUser.role === 'admin' || currentUser.role === 'creator';
 
   async function loadMe() {
     try {
@@ -671,13 +752,22 @@
     const name = currentUser.full_name
       ? `<strong>${esc(currentUser.full_name)}</strong> <span class="muted">(${esc(currentUser.username)})</span>`
       : `<strong>${esc(currentUser.username)}</strong>`;
+    const rolePill = currentUser.role === 'admin'
+      ? 'admin'
+      : currentUser.role === 'creator'
+      ? 'creator'
+      : 'viewer';
     whoami.innerHTML =
       `Signed in as ${name} ` +
-      `<span class="pill ${currentUser.role === 'admin' ? 'admin' : 'viewer'}">${esc(currentUser.role)}</span>`;
-    if (currentUser.role === 'admin') {
+      `<span class="pill ${rolePill}">${esc(currentUser.role)}</span>`;
+    if (canAdmin()) {
       availPanel.hidden = false;
       usersPanel.hidden = false;
       templatesPanel.hidden = false;
+      requestFeatureBtn.hidden = false;
+    }
+    if (currentUser.role === 'creator') {
+      featureRequestsPanel.hidden = false;
     }
     // The "My appointments" toggle only makes sense if the user has a
     // full name we can match against the scheduler's assigned_rep.
@@ -852,7 +942,7 @@
       byDate[k].sort((a, b) => a.time.localeCompare(b.time));
     }
 
-    const showCancel = currentUser.role === 'admin';
+    const showCancel = canAdmin();
     const sections = days.map((date) => {
       const dayRows = byDate[date] || [];
       const headerCls = date === todayYmd ? ' today' : '';
@@ -1220,8 +1310,9 @@
               <td>${u.full_name ? esc(u.full_name) : '<span class="muted">—</span>'}</td>
               <td>
                 <select data-role-for="${u.id}">
-                  <option value="viewer" ${u.role === 'viewer' ? 'selected' : ''}>Viewer</option>
-                  <option value="admin"  ${u.role === 'admin'  ? 'selected' : ''}>Admin</option>
+                  <option value="viewer"  ${u.role === 'viewer'  ? 'selected' : ''}>Viewer</option>
+                  <option value="admin"   ${u.role === 'admin'   ? 'selected' : ''}>Admin</option>
+                  <option value="creator" ${u.role === 'creator' ? 'selected' : ''}>Creator</option>
                 </select>
               </td>
               <td class="muted">${esc(u.created_at || '')}</td>
@@ -1455,6 +1546,147 @@
     } catch (err) {
       templateMsg(name, err.message || 'Failed to reset.', 'err');
     }
+  }
+
+  /* ===================== FEATURE REQUESTS ====================== */
+  // Submit modal (admin OR creator)
+  const frModal       = document.getElementById('frModal');
+  const frForm        = document.getElementById('frForm');
+  const frDescription = document.getElementById('frDescription');
+  const frMsg         = document.getElementById('frMsg');
+  const frCancel      = document.getElementById('frCancel');
+  const frSubmit      = document.getElementById('frSubmit');
+
+  // Manage panel (creator-only)
+  const featureRequestsList   = document.getElementById('featureRequestsList');
+  const featureRequestsCount  = document.getElementById('featureRequestsCount');
+
+  function openFrModal() {
+    frDescription.value = '';
+    setFrMsg('', '');
+    frModal.hidden = false;
+    setTimeout(() => frDescription.focus(), 50);
+  }
+  function closeFrModal() {
+    frModal.hidden = true;
+  }
+  function setFrMsg(text, kind) {
+    frMsg.textContent = text || '';
+    frMsg.className = 'modal-msg' + (kind ? ' ' + kind : '');
+  }
+
+  requestFeatureBtn.addEventListener('click', openFrModal);
+  frCancel.addEventListener('click', closeFrModal);
+  frModal.addEventListener('click', (e) => {
+    if (e.target === frModal) closeFrModal();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !frModal.hidden) closeFrModal();
+  });
+
+  frForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const description = frDescription.value.trim();
+    if (!description) {
+      return setFrMsg('Please enter a description.', 'err');
+    }
+    frSubmit.disabled = true;
+    try {
+      await apiJson('/api/feature-requests', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ description }),
+      });
+      setFrMsg('Submitted. Thanks!', 'ok');
+      // If the creator panel is open on this page (the same user is also
+      // creator, e.g. they're testing), refresh the list so the new row
+      // appears.
+      if (featureRequestsPanel.open) loadFeatureRequests();
+      setTimeout(closeFrModal, 1200);
+    } catch (err) {
+      setFrMsg(err.message || 'Failed to submit.', 'err');
+    } finally {
+      frSubmit.disabled = false;
+    }
+  });
+
+  // Lazy-load the list when the panel is first opened.
+  featureRequestsPanel.addEventListener('toggle', () => {
+    if (featureRequestsPanel.open) loadFeatureRequests();
+  });
+
+  async function loadFeatureRequests() {
+    featureRequestsList.innerHTML = '<div class="empty">Loading…</div>';
+    try {
+      const data = await apiJson('/api/feature-requests');
+      renderFeatureRequests(data.feature_requests || []);
+    } catch (err) {
+      featureRequestsList.innerHTML =
+        `<div class="empty">Couldn't load requests: ${esc(err.message)}</div>`;
+    }
+  }
+
+  function renderFeatureRequests(rows) {
+    const pending = rows.filter((r) => r.status === 'pending').length;
+    featureRequestsCount.textContent = rows.length
+      ? `${pending} pending / ${rows.length} total`
+      : '';
+    if (rows.length === 0) {
+      featureRequestsList.innerHTML =
+        '<div class="empty">No feature requests yet. Use the "Request a Feature" button up top to submit one.</div>';
+      return;
+    }
+    featureRequestsList.innerHTML = `
+      <table>
+        <thead>
+          <tr>
+            <th style="width: 90px;">Status</th>
+            <th>Request</th>
+            <th style="width: 130px;">Submitted</th>
+            <th style="width: 100px;">By</th>
+            <th style="width: 110px;"></th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map((r) => {
+            const isPending = r.status === 'pending';
+            const actions = isPending
+              ? `<button class="fr-action complete" title="Mark complete" data-resolve="${r.id}" data-status="completed">✓</button>` +
+                `<button class="fr-action decline"  title="Decline"      data-resolve="${r.id}" data-status="declined">✗</button>`
+              : `<span class="fr-meta">by ${esc(r.resolved_by_username || '—')}<br>${esc((r.resolved_at || '').slice(0, 16))}</span>`;
+            return `
+              <tr data-id="${r.id}">
+                <td><span class="pill ${esc(r.status)}">${esc(r.status)}</span></td>
+                <td><div class="fr-desc">${esc(r.description)}</div></td>
+                <td class="fr-meta">${esc((r.created_at || '').slice(0, 16))}</td>
+                <td>${esc(r.requested_by_username)}</td>
+                <td>${actions}</td>
+              </tr>
+            `;
+          }).join('')}
+        </tbody>
+      </table>
+    `;
+    featureRequestsList.querySelectorAll('[data-resolve]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const id = btn.dataset.resolve;
+        const status = btn.dataset.status;
+        const verb = status === 'completed' ? 'mark as complete' : 'decline';
+        if (!confirm(`Are you sure you want to ${verb} this request?`)) return;
+        btn.disabled = true;
+        try {
+          await apiJson('/api/feature-requests/' + id, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ status }),
+          });
+          loadFeatureRequests();
+        } catch (err) {
+          alert('Failed: ' + (err.message || 'unknown error'));
+          btn.disabled = false;
+        }
+      });
+    });
   }
 
   /* ======================= CHANGE PASSWORD ===================== */

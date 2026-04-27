@@ -591,6 +591,14 @@ function isValidUsername(u) {
   return typeof u === 'string' && /^[A-Za-z0-9._-]{3,32}$/.test(u);
 }
 
+// Valid role values. `admin` and `creator` both grant admin-page powers;
+// `creator` additionally sees the Feature Requests panel and is the only
+// role that can complete/decline feature requests. `viewer` is read-only.
+const VALID_ROLES = ['admin', 'viewer', 'creator'];
+function isAdminLikeRole(role) {
+  return role === 'admin' || role === 'creator';
+}
+
 /** Format a Date as local YYYY-MM-DD (avoids UTC shift of toISOString). */
 function formatLocalDate(d) {
   const y = d.getFullYear();
@@ -1104,6 +1112,21 @@ db.exec(`
     body       TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
+
+  -- Feature requests submitted by admins/creators from the admin page.
+  -- Creators triage them: green check → completed, red X → declined.
+  CREATE TABLE IF NOT EXISTS feature_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    description TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending'
+      CHECK (status IN ('pending', 'completed', 'declined')),
+    requested_by_username TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    resolved_at TEXT,
+    resolved_by_username TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_feature_requests_status
+    ON feature_requests(status, created_at DESC);
 `);
 
 // ---- Migration: cancel_token column --------------------------------------
@@ -1145,6 +1168,37 @@ db.exec(`
   if (!cols.some((c) => c.name === 'full_name')) {
     db.exec(`ALTER TABLE users ADD COLUMN full_name TEXT`);
   }
+})();
+
+// ---- Migration: relax role CHECK on users (allow 'creator') --------------
+// SQLite can't modify a CHECK constraint in place. Rebuild the table
+// without the constraint when we detect the old "admin/viewer only"
+// shape; subsequent boots see no CHECK and skip. Application-level
+// validation in /api/users now controls valid role values.
+(function migrateUsersRoleCheck() {
+  const meta = db
+    .prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='users'`)
+    .get();
+  if (!meta || !/CHECK\s*\(\s*role\s+IN\s*\(\s*'admin'\s*,\s*'viewer'\s*\)\s*\)/i.test(meta.sql)) {
+    return; // already migrated (or table just got created without the CHECK)
+  }
+  db.exec(`
+    BEGIN TRANSACTION;
+    CREATE TABLE users_new (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      username      TEXT    NOT NULL UNIQUE,
+      password_hash TEXT    NOT NULL,
+      role          TEXT    NOT NULL,
+      created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+      full_name     TEXT
+    );
+    INSERT INTO users_new (id, username, password_hash, role, created_at, full_name)
+      SELECT id, username, password_hash, role, created_at, full_name FROM users;
+    DROP TABLE users;
+    ALTER TABLE users_new RENAME TO users;
+    COMMIT;
+  `);
+  console.log('[db] relaxed users.role CHECK constraint (now allows custom roles)');
 })();
 
 // ---- Migration: appointments.assigned_rep --------------------------------
@@ -1429,6 +1483,31 @@ const stmtUpdateTemplate = db.prepare(
   `UPDATE templates SET subject = ?, body = ?, updated_at = datetime('now') WHERE name = ?`
 );
 
+// Feature-request prepared statements
+const stmtInsertFeatureRequest = db.prepare(
+  `INSERT INTO feature_requests (description, requested_by_username) VALUES (?, ?)`
+);
+const stmtListFeatureRequests = db.prepare(`
+  SELECT id, description, status, requested_by_username, created_at,
+         resolved_at, resolved_by_username
+    FROM feature_requests
+   ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END,
+            created_at DESC
+`);
+const stmtFindFeatureRequest = db.prepare(`
+  SELECT id, description, status, requested_by_username, created_at,
+         resolved_at, resolved_by_username
+    FROM feature_requests
+   WHERE id = ?
+`);
+const stmtResolveFeatureRequest = db.prepare(`
+  UPDATE feature_requests
+     SET status = ?,
+         resolved_at = datetime('now'),
+         resolved_by_username = ?
+   WHERE id = ?
+`);
+
 // Block-related prepared statements
 const stmtInsertBlock = db.prepare(`
   INSERT INTO blocked_slots (date, time, reason)
@@ -1495,10 +1574,10 @@ function getSession(req) {
   return row;
 }
 
-/** Kept for callers that just want a yes/no. */
+/** Kept for callers that just want a yes/no. Accepts admin and creator. */
 function isAdmin(req) {
   const s = getSession(req);
-  return !!s && s.role === 'admin';
+  return !!s && isAdminLikeRole(s.role);
 }
 
 /** Require any logged-in user (admin OR viewer). */
@@ -1513,7 +1592,7 @@ function requireUser(req, res, next) {
   next();
 }
 
-/** Require a logged-in admin. Viewers get a 403. */
+/** Require a logged-in admin OR creator. Viewers get a 403. */
 function requireAdmin(req, res, next) {
   const s = getSession(req);
   if (!s) {
@@ -1522,8 +1601,23 @@ function requireAdmin(req, res, next) {
     }
     return res.status(401).json({ error: 'Unauthorized' });
   }
-  if (s.role !== 'admin') {
+  if (!isAdminLikeRole(s.role)) {
     return res.status(403).json({ error: 'Admin access required' });
+  }
+  next();
+}
+
+/** Require the 'creator' role specifically (feature-request management). */
+function requireCreator(req, res, next) {
+  const s = getSession(req);
+  if (!s) {
+    if (req.accepts('html') && !req.path.startsWith('/api/')) {
+      return res.redirect('/login');
+    }
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  if (s.role !== 'creator') {
+    return res.status(403).json({ error: 'Creator access required' });
   }
   next();
 }
@@ -2257,8 +2351,10 @@ app.post('/api/users', requireAdmin, (req, res) => {
   if (!password || password.length < 6) {
     return res.status(400).json({ error: 'password must be at least 6 characters' });
   }
-  if (role !== 'admin' && role !== 'viewer') {
-    return res.status(400).json({ error: 'role must be "admin" or "viewer"' });
+  if (!VALID_ROLES.includes(role)) {
+    return res
+      .status(400)
+      .json({ error: `role must be one of: ${VALID_ROLES.join(', ')}` });
   }
   if (fullName.length > 100) {
     return res.status(400).json({ error: 'full name is too long (max 100 chars)' });
@@ -2303,8 +2399,10 @@ app.patch('/api/users/:id', requireAdmin, (req, res) => {
 
   if (body.role !== undefined) {
     const role = String(body.role).trim();
-    if (role !== 'admin' && role !== 'viewer') {
-      return res.status(400).json({ error: 'role must be "admin" or "viewer"' });
+    if (!VALID_ROLES.includes(role)) {
+      return res
+        .status(400)
+        .json({ error: `role must be one of: ${VALID_ROLES.join(', ')}` });
     }
     updates.role = role;
   }
@@ -2459,6 +2557,71 @@ app.post('/api/templates/:name/reset', requireAdmin, (req, res) => {
   if (!def) return res.status(404).json({ error: 'no default known for this template' });
   stmtUpdateTemplate.run(def.subject || '', def.body, name);
   res.json(templateRowToPublic(stmtFindTemplate.get(name)));
+});
+
+// ---- Feature requests ----------------------------------------------------
+//
+// Admins and creators can submit feature requests. Only creators can list
+// or resolve them (mark complete / decline). The list endpoint also
+// returns a `can_manage` flag so the UI can decide whether to show the
+// resolve buttons (defensive — the server enforces the same on writes).
+
+// Submit a new feature request. Open to admins and creators.
+app.post('/api/feature-requests', requireAdmin, (req, res) => {
+  const body = req.body || {};
+  const description = String(body.description || '').trim();
+  if (!description) {
+    return res.status(400).json({ error: 'description is required' });
+  }
+  if (description.length > 4000) {
+    return res
+      .status(400)
+      .json({ error: 'description is too long (max 4,000 chars)' });
+  }
+  const me = getSession(req);
+  const result = stmtInsertFeatureRequest.run(
+    description,
+    (me && me.username) || 'admin'
+  );
+  console.log(
+    `[feature-request] #${result.lastInsertRowid} submitted by ${(me && me.username) || 'admin'}`
+  );
+  res.status(201).json(stmtFindFeatureRequest.get(result.lastInsertRowid));
+});
+
+// List all feature requests. Creator-only — admins and viewers don't
+// need to see the management surface.
+app.get('/api/feature-requests', requireCreator, (_req, res) => {
+  res.json({ feature_requests: stmtListFeatureRequests.all() });
+});
+
+// Resolve a feature request (mark complete or decline). Creator-only.
+// Body: { status: 'completed' | 'declined' }
+app.patch('/api/feature-requests/:id', requireCreator, (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) {
+    return res.status(400).json({ error: 'invalid id' });
+  }
+  const body = req.body || {};
+  const status = String(body.status || '').trim();
+  if (status !== 'completed' && status !== 'declined') {
+    return res
+      .status(400)
+      .json({ error: 'status must be "completed" or "declined"' });
+  }
+  const existing = stmtFindFeatureRequest.get(id);
+  if (!existing) return res.status(404).json({ error: 'not found' });
+  if (existing.status !== 'pending') {
+    return res.status(409).json({
+      error: `request is already ${existing.status}; cannot change`,
+    });
+  }
+  const me = getSession(req);
+  stmtResolveFeatureRequest.run(status, (me && me.username) || 'creator', id);
+  console.log(
+    `[feature-request] #${id} → ${status} by ${(me && me.username) || 'creator'}`
+  );
+  res.json(stmtFindFeatureRequest.get(id));
 });
 
 // ---- Block management (admin-only) ---------------------------------------
