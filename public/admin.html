@@ -788,6 +788,24 @@
     return `https://${currentUser.zendesk_subdomain}.zendesk.com/agent/tickets/${ticketId}`;
   }
 
+  /**
+   * Render a SQLite created_at timestamp as "MM/DD H:MM" in the admin's
+   * local timezone. SQLite's datetime('now') stores UTC as
+   * "YYYY-MM-DD HH:MM:SS"; we parse that, then format month/day with two
+   * digits and the hour without leading zero (24-hour, e.g. "9:32" or
+   * "14:30") to match the requested style.
+   */
+  function formatScheduledAt(s) {
+    if (!s) return '<span class="muted">—</span>';
+    const d = new Date(String(s).replace(' ', 'T') + 'Z');
+    if (isNaN(d.getTime())) return esc(s);
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    const h  = d.getHours();
+    const mi = String(d.getMinutes()).padStart(2, '0');
+    return `${mm}/${dd} ${h}:${mi}`;
+  }
+
   /* ====================== WEEK-VIEW HELPERS ==================== */
   // Both the Appointments and Availability tabs render as a Mon–Fri week
   // with per-day headers. The week is identified by the Monday date.
@@ -967,6 +985,7 @@
           <tr data-id="${r.id}">
             <td><strong>${esc(r.time)}</strong></td>
             <td>${esc(r.name)}</td>
+            <td class="fr-meta">${formatScheduledAt(r.created_at)}</td>
             <td><a href="mailto:${esc(r.email)}">${esc(r.email)}</a></td>
             <td>${esc(r.phone)}</td>
             <td><span class="pill ${r.source === 'api' ? 'api' : 'web'}">${esc(r.source)}</span></td>
@@ -984,6 +1003,7 @@
               <tr>
                 <th>Time</th>
                 <th>Name</th>
+                <th>Time Scheduled</th>
                 <th>Email</th>
                 <th>Phone</th>
                 <th>Source</th>
