@@ -39,6 +39,13 @@ services:
       - key: TZ
         value: America/New_York
 
+      # Minimum lead time (in minutes) before a slot. Slots whose start
+      # time is within this window of "now" are no longer offered to
+      # customers — gives the team time to see and prep for the call.
+      # Default 20. Set to 0 to disable.
+      - key: BOOKING_LEAD_MINUTES
+        value: "20"
+
       # Admin password for the /admin page. `sync: false` means Render will
       # prompt you to enter a value in the dashboard on first deploy and
       # keep it private — never stored in this YAML / in git.

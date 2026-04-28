@@ -461,6 +461,14 @@ if (RV_BIN_ID && RV_API_KEY) {
 const SLOT_MINUTES = 30;
 const BUSINESS_START_HOUR = 9;   // 9:00
 const BUSINESS_END_HOUR = 17;    // 17:00 (last slot starts 16:30)
+// Minimum lead time before a slot — slots whose start time is within this
+// many minutes of "now" are no longer offered to customers. Gives the team
+// a heads-up window to see and prepare for the call. Configurable via env
+// var; defaults to 20. Set to 0 to disable the buffer entirely.
+const BOOKING_LEAD_MINUTES = (() => {
+  const n = parseInt(process.env.BOOKING_LEAD_MINUTES, 10);
+  return Number.isFinite(n) && n >= 0 ? n : 20;
+})();
 
 /** Generate all slot start times (as "HH:MM") for a business day. */
 function generateSlotsForDay() {
@@ -618,12 +626,19 @@ function nowET() {
   );
 }
 
-/** True if the given slot (date + HH:MM) has already passed in Eastern Time. */
+/**
+ * True if the given slot (date + HH:MM) is no longer available — either
+ * already in the past OR within BOOKING_LEAD_MINUTES of "now" in Eastern
+ * Time. Customers can't book a slot that's about to start, which gives
+ * the team time to prep. Status field stays "past" in /api/slots so the
+ * UI rendering doesn't change.
+ */
 function isSlotInPast(dateStr, timeStr) {
   const [y, m, d] = dateStr.split('-').map(Number);
   const [hh, mm] = timeStr.split(':').map(Number);
   const slot = new Date(y, m - 1, d, hh, mm);
-  return slot <= nowET();
+  const cutoff = new Date(nowET().getTime() + BOOKING_LEAD_MINUTES * 60_000);
+  return slot <= cutoff;
 }
 
 /** Pretty date for humans: "Monday, April 27, 2026". */
@@ -1929,11 +1944,15 @@ app.post('/api/appointments', async (req, res) => {
       .json({ error: 'That time slot is unavailable.' });
   }
 
-  // Reject times that have already passed (in Eastern Time).
+  // Reject times that have already passed OR are within the lead-time
+  // buffer (in Eastern Time). See BOOKING_LEAD_MINUTES.
   if (isSlotInPast(date, time)) {
-    return res
-      .status(400)
-      .json({ error: 'That time slot has already passed.' });
+    return res.status(400).json({
+      error:
+        BOOKING_LEAD_MINUTES > 0
+          ? `That time slot is no longer available (slots must be at least ${BOOKING_LEAD_MINUTES} minutes from now).`
+          : 'That time slot has already passed.',
+    });
   }
 
   try {
@@ -2152,7 +2171,12 @@ app.post('/api/appointments/reschedule', (req, res) => {
     });
   }
   if (isSlotInPast(date, time)) {
-    return res.status(400).json({ error: 'That time slot has already passed.' });
+    return res.status(400).json({
+      error:
+        BOOKING_LEAD_MINUTES > 0
+          ? `That time slot is no longer available (slots must be at least ${BOOKING_LEAD_MINUTES} minutes from now).`
+          : 'That time slot has already passed.',
+    });
   }
   if (stmtFindBlockByDateTime.get(date, time)) {
     return res.status(409).json({ error: 'That time slot is unavailable.' });
