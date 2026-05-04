@@ -1936,6 +1936,9 @@ app.post('/api/appointments', async (req, res) => {
   if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
     return res.status(400).json({ error: 'a valid email is required' });
   }
+  if (!phone || typeof phone !== 'string' || phone.trim().length === 0) {
+    return res.status(400).json({ error: 'phone is required' });
+  }
 
   // Reject blocked slots before we try to insert.
   if (stmtFindBlockByDateTime.get(date, time)) {
@@ -2180,6 +2183,16 @@ app.post('/api/appointments/reschedule', (req, res) => {
   }
   if (stmtFindBlockByDateTime.get(date, time)) {
     return res.status(409).json({ error: 'That time slot is unavailable.' });
+  }
+  // Phone is required. If the caller sent an empty/blank phone, reject.
+  // If they didn't send the field at all, fall back to the existing value
+  // (and reject if that's also blank — i.e. legacy rows that predate the
+  // requirement must have a phone added on reschedule).
+  const incomingPhone = body.phone != null ? String(body.phone).trim() : null;
+  const effectivePhone =
+    incomingPhone != null ? incomingPhone : (existing.phone || '').trim();
+  if (!effectivePhone) {
+    return res.status(400).json({ error: 'phone is required' });
   }
   // Allow "reschedule to the same slot" — no-op. If a different slot, the
   // UNIQUE(date,time) constraint will guard against booking over someone else.
