@@ -17,3 +17,7 @@ npm-debug.log*
 # Editor / IDE
 .vscode/
 .idea/
+
+# Favicon source bundle (generated set is copied into public/)
+favicon/
+favicon.zip
